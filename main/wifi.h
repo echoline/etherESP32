@@ -57,4 +57,5 @@ void init_wifi(void);
 void get_mac_address(char*);
 unsigned long read_stats(char*);
 unsigned long read_ifstats(char*);
+void set_essid(char*);
 

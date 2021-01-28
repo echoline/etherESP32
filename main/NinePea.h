@@ -215,6 +215,7 @@ struct hentry {
 	struct hentry *next;
 	struct hentry *prev;
 	void *aux;
+	int conn;
 };
 
 struct htable {

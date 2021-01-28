@@ -3,13 +3,78 @@
 #include "esp_pthread.h"
 #include <pthread.h>
 
-#define DEFAULT_SCAN_LIST_SIZE 10
+#define DEFAULT_SCAN_LIST_SIZE 30
 
 static esp_netif_t *sta_netif = NULL;
 pthread_mutex_t scanmutex = PTHREAD_MUTEX_INITIALIZER;
 static uint16_t ap_count = 0;
 
 Wnode *wns;
+
+static char *essid;
+
+static char Sconn[] = "connecting";
+static char Sauth[] = "authenticated";
+static char Sneedauth[] = "need authentication";
+static char Sunauth[] = "unauthenticated";
+
+static char Sassoc[] = "associated";
+static char Sunassoc[] = "unassociated";
+static char Sblocked[] = "blocked";	/* no keys negotiated. only pass EAPOL frames */
+
+char*
+status(void)
+{
+	return Sneedauth;
+}
+
+unsigned long
+inpkts(void)
+{
+	return 0;
+}
+
+int
+linkstatus(void)
+{
+	return 0;
+}
+
+unsigned long
+outpkts(void)
+{
+	return 0;
+}
+
+int
+rssi(void)
+{
+	return 0;
+}
+
+char*
+get_essid(void)
+{
+	return essid? essid: "";
+}
+
+char*
+bssid(void)
+{
+	return "";
+}
+
+int
+channel(void)
+{
+	return 0;
+}
+
+void
+set_essid(char *in)
+{
+	essid = strdup(in);
+}
 
 void*
 scan_func(void *p)
@@ -22,6 +87,12 @@ scan_func(void *p)
 	pthread_cond_t sleepcond = PTHREAD_COND_INITIALIZER;
 	struct timeval tv;
 	unsigned long now;
+	wifi_scan_config_t cfg = {
+		.ssid = 0,
+		.bssid = 0,
+		.channel = 0,
+		.show_hidden = true
+	};
 
 	pthread_mutex_init(&sleepmutex, NULL);
 	pthread_cond_init(&sleepcond, NULL);
@@ -29,7 +100,7 @@ scan_func(void *p)
 	for(;;) {
 		memset(ap_info, 0, sizeof(ap_info));
 
-		ESP_ERROR_CHECK(esp_wifi_scan_start(NULL, true));
+		ESP_ERROR_CHECK(esp_wifi_scan_start(&cfg, true));
 		ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_info));
 		ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_count));
 
@@ -99,9 +170,9 @@ read_stats(char *str)
 
 	get_mac_address(mac);
 
-	ret = sprintf(str, "in: %d\n"
+	ret = sprintf(str, "in: %lu\n"
 			"link: %d\n"
-			"out: %d\n"
+			"out: %lu\n"
 			"crc errs: %d\n"
 			"overflows: %d\n"
 			"soft overflows: %d\n"
@@ -111,7 +182,9 @@ read_stats(char *str)
 			"prom: %d\n"
 			"mbps: %d\n"
 			"addr: %s\n",
-			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, mac);
+			inpkts(), linkstatus(), outpkts(),
+			0, 0, 0, 0, 0, 0, 0,
+			2, mac);
 
 	return ret;
 }
@@ -130,7 +203,7 @@ read_ifstats(char *str)
 			"bssid: %s\n"
 			"status: %s\n"
 			"channel: %.2d\n",
-			0, "", "", "disconnected", 0);
+			rssi(), get_essid(), bssid(), status(), channel());
 
 	gettimeofday(&tv, NULL);
 	now = tv.tv_sec * 1000LL + (tv.tv_usec / 1000LL);

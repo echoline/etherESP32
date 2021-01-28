@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <unistd.h>
+#include <string.h>
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,7 +22,12 @@ static char Sdata[] = "data";
 static char Stype[] = "type";
 static char Sconn[13];
 
+typedef struct {
+	int type;
+} Conn;
+
 static int nconns = 0;
+static Conn *conns = NULL;
 
 /* paths */
 
@@ -55,7 +61,7 @@ static Fcall*
 fs_walk(Fcall *ifcall) {
 	unsigned long path;
 	struct hentry *ent = fs_fid_find(ifcall->fid);
-	int i, j, l;
+	int i, j, l, conn = -1;
 
 	if (!ent) {
 		ofcall.type = RError;
@@ -125,11 +131,11 @@ fs_walk(Fcall *ifcall) {
 						return &ofcall;
 					}
 				}
-				j = atoi(ifcall->wname[i]);
-				if (j < nconns) {
+				conn = atoi(ifcall->wname[i]);
+				if (conn < nconns) {
 					ofcall.wqid[i].type = QTDIR;
 					ofcall.wqid[i].version = 0;
-					ofcall.wqid[i].path = path = QNUM + j;
+					ofcall.wqid[i].path = path = QNUM + conn;
 				} else {
 					ofcall.type = RError;
 					ofcall.ename = Enofile;
@@ -139,8 +145,8 @@ fs_walk(Fcall *ifcall) {
 			break;
 		default:
 			if (path >= QNUM) {
-				j = path - QNUM;
-				if (j >= nconns) {
+				conn = path - QNUM;
+				if (conn >= nconns) {
 					ofcall.type = RError;
 					ofcall.ename = Enofile;
 
@@ -206,7 +212,8 @@ fs_walk(Fcall *ifcall) {
 		return &ofcall;
 	}
 
-	fs_fid_add(ifcall->newfid, path);
+	ent = fs_fid_add(ifcall->newfid, path);
+	ent->conn = conn;
 
 	return &ofcall;
 }
@@ -327,9 +334,6 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		ofcall.type = RError;
 		ofcall.ename = Enofile;
 	}
-	else if (ifcall->offset != 0) {
-		out[0] = '\0';
-	}
 	else if (((unsigned long)cur->data) == Qroot) {
 		stat.type = 0;
 		stat.dev = 0;
@@ -388,7 +392,9 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		ofcall.count = 12;
 	}
 	else if (((unsigned long)cur->data) == Qclone) {
+		cur->conn = nconns;
 		ofcall.count = sprintf((char*)out, "%11d ", nconns++);
+		conns = realloc(conns, nconns * sizeof(Conn));
 	}
 	else if (((unsigned long)cur->data) == Qstats) {
 		ofcall.count = read_stats((char*)out);
@@ -436,6 +442,13 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		ofcall.ename = Enofile;
 	}
 
+	if (ifcall->offset != 0) {
+		if (ofcall.count >= ifcall->offset) {
+			memmove(out, &out[ifcall->offset], ofcall.count - ifcall->offset);
+			ofcall.count -= ifcall->offset;
+		}
+	}
+
 	if (ofcall.count > ifcall->count)
 		ofcall.count = ifcall->count;
 
@@ -452,6 +465,38 @@ fs_create(Fcall *ifcall) {
 
 static Fcall*
 fs_write(Fcall *ifcall, unsigned char *in) {
+	struct hentry *cur = fs_fid_find(ifcall->fid);
+
+	if (cur == NULL) {
+		ofcall.type = RError;
+		ofcall.ename = Enofile;
+
+		return &ofcall;
+	}
+
+	if (((unsigned long)cur->data) == Qclone) {
+		if (strncmp((const char*)in, "connect ", 8) == 0) {
+			in[ifcall->count] = '\0';
+			in[strcspn((const char*)in, "\r\n")] = '\0';
+
+			conns[cur->conn].type = strtoul((const char*)&in[8], 0, 0);
+
+			ofcall.count = ifcall->count;
+			return &ofcall;
+		}
+		if (conns[cur->conn].type == 0x888e) {
+			if (strncmp((const char*)in, "essid ", 6) == 0) {
+				in[ifcall->count] = '\0';
+				in[strcspn((const char*)in, "\r\n")] = '\0';
+
+				set_essid((char*)&in[6]);
+
+				ofcall.count = ifcall->count;
+				return &ofcall;
+			}
+		}
+	}
+
 	ofcall.type = RError;
 	ofcall.ename = Eperm;
 
