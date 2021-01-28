@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "NinePea.h"
 #include "wifi.h"
+#include "esp_pthread.h"
 
 static Fcall ofcall;
 static char errstr[64];
@@ -392,6 +393,9 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 	else if (((unsigned long)cur->data) == Qstats) {
 		ofcall.count = read_stats((char*)out);
 	}
+	else if (((unsigned long)cur->data) == Qifstats) {
+		ofcall.count = read_ifstats((char*)out);
+	}
 	else if (((unsigned long)cur->data) >= QNUM) {
 		id = (unsigned long)cur->data - QNUM;
 		if (id >= nconns) {
@@ -493,6 +497,10 @@ app_main(void)
 	unsigned long l;
 
 	Callbacks callbacks;
+
+	esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+	cfg.stack_size = (4 * 1024);
+	esp_pthread_set_cfg(&cfg);
 
 	init_wifi();
 

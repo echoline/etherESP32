@@ -1,10 +1,63 @@
 #include "wifi.h"
+#include "NinePea.h"
+#include "esp_pthread.h"
+#include <pthread.h>
 
-static esp_netif_t *sta_netif = NULL;                                           
+#define DEFAULT_SCAN_LIST_SIZE 10
+
+static esp_netif_t *sta_netif = NULL;
+pthread_mutex_t scanmutex = PTHREAD_MUTEX_INITIALIZER;
+static uint16_t ap_count = 0;
+
+Wnode *wns;
+
+void*
+scan_func(void *p)
+{
+	uint16_t number = DEFAULT_SCAN_LIST_SIZE;
+	wifi_ap_record_t ap_info[DEFAULT_SCAN_LIST_SIZE];
+	int i;
+	struct timespec ts;
+	pthread_mutex_t sleepmutex = PTHREAD_MUTEX_INITIALIZER;
+	pthread_cond_t sleepcond = PTHREAD_COND_INITIALIZER;
+	struct timeval tv;
+	unsigned long now;
+
+	pthread_mutex_init(&sleepmutex, NULL);
+	pthread_cond_init(&sleepcond, NULL);
+
+	for(;;) {
+		memset(ap_info, 0, sizeof(ap_info));
+
+		ESP_ERROR_CHECK(esp_wifi_scan_start(NULL, true));
+		ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_info));
+		ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_count));
+
+		gettimeofday(&tv, NULL);
+		now = tv.tv_sec * 1000LL + (tv.tv_usec / 1000LL);
+
+		for (i = 0; i < DEFAULT_SCAN_LIST_SIZE && i < ap_count; i++) {
+			sprintf(wns[i].ssid, "%s", ap_info[i].ssid);
+			memcpy(wns[i].bssid, ap_info[i].bssid, 6);
+			wns[i].lastseen = now;
+			wns[i].channel = ap_info[i].primary;
+		}
+
+		pthread_mutex_lock(&sleepmutex);
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_sec += 5;
+		pthread_cond_timedwait(&sleepcond, &sleepmutex, &ts);
+		pthread_mutex_unlock(&sleepmutex);
+	}
+
+	return NULL;
+}
 
 void
 init_wifi(void)
 {
+	pthread_t t1;
+
 	ESP_ERROR_CHECK(nvs_flash_init());
 
 	ESP_ERROR_CHECK(esp_netif_init());
@@ -15,6 +68,17 @@ init_wifi(void)
 	ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 	ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+	ESP_ERROR_CHECK(esp_wifi_start());
+
+	wns = calloc(DEFAULT_SCAN_LIST_SIZE, sizeof(Wnode));
+
+	pthread_create(&t1, NULL, scan_func, NULL);
+}
+
+void
+mac2str(char *str, uint8_t *mac)
+{
+	sprintf(str, "%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 void
@@ -24,7 +88,7 @@ get_mac_address(char *str)
 
 	ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
 
-	sprintf(str, "%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	mac2str(str, mac);
 }
 
 unsigned long
@@ -51,3 +115,31 @@ read_stats(char *str)
 
 	return ret;
 }
+
+unsigned long
+read_ifstats(char *str)
+{
+	unsigned long ret;
+	int i;
+	char mac[13];
+	struct timeval tv;
+	unsigned long now;
+
+	ret = sprintf(str, "Signal: %d\n"
+			"essid: %s\n"
+			"bssid: %s\n"
+			"status: %s\n"
+			"channel: %.2d\n",
+			0, "", "", "disconnected", 0);
+
+	gettimeofday(&tv, NULL);
+	now = tv.tv_sec * 1000LL + (tv.tv_usec / 1000LL);
+
+	for (i = 0; i < ap_count && i < DEFAULT_SCAN_LIST_SIZE; i++) {
+		mac2str(mac, wns[i].bssid);
+		ret += snprintf(&str[ret], MAX_IO - ret, "node: %s %.4x %-11ld %.2d %s\n", mac, wns[i].cap, now - wns[i].lastseen, wns[i].channel, wns[i].ssid);
+	}
+
+	return ret;
+}
+
