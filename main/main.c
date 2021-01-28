@@ -15,6 +15,12 @@ static char Saddr[] = "addr";
 static char Sclone[] = "clone";
 static char Sifstats[] = "ifstats";
 static char Sstats[] = "stats";
+static char Sctl[] = "ctl";
+static char Sdata[] = "data";
+static char Stype[] = "type";
+static char Sconn[13];
+
+static int nconns = 0;
 
 /* paths */
 
@@ -25,6 +31,9 @@ enum {
 	Qclone,
 	Qifstats,
 	Qstats,
+	Qctl,
+	Qdata,
+	Qtype,
 	QNUM,
 };
 
@@ -45,7 +54,7 @@ static Fcall*
 fs_walk(Fcall *ifcall) {
 	unsigned long path;
 	struct hentry *ent = fs_fid_find(ifcall->fid);
-	int i;
+	int i, j, l;
 
 	if (!ent) {
 		ofcall.type = RError;
@@ -107,16 +116,82 @@ fs_walk(Fcall *ifcall) {
 				ofcall.wqid[i].path = path = Qstats;
 			}
 			else {
-				ofcall.type = RError;
-				ofcall.ename = Enofile;
-				return &ofcall;
+				l = strlen(ifcall->wname[i]);
+				for (j = 0; j < l; j++) {
+					if (!isdigit(ifcall->wname[i][j])) {
+						ofcall.type = RError;
+						ofcall.ename = Enofile;
+						return &ofcall;
+					}
+				}
+				j = atoi(ifcall->wname[i]);
+				if (j < nconns) {
+					ofcall.wqid[i].type = QTDIR;
+					ofcall.wqid[i].version = 0;
+					ofcall.wqid[i].path = path = QNUM + j;
+				} else {
+					ofcall.type = RError;
+					ofcall.ename = Enofile;
+					return &ofcall;
+				}
 			}
 			break;
 		default:
-			ofcall.type = RError;
-			ofcall.ename = Enofile;
+			if (path >= QNUM) {
+				j = path - QNUM;
+				if (j >= nconns) {
+					ofcall.type = RError;
+					ofcall.ename = Enofile;
 
-			return &ofcall;
+					return &ofcall;
+				}
+				if (!strcmp(ifcall->wname[i], ".")) {
+					ofcall.wqid[i].type = QTDIR;
+					ofcall.wqid[i].version = 0;
+					ofcall.wqid[i].path = path;
+				}
+				else if (!strcmp(ifcall->wname[i], "..")) {
+					ofcall.wqid[i].type = QTDIR;
+					ofcall.wqid[i].version = 0;
+					ofcall.wqid[i].path = path = Qether;
+				}
+				else if (!strcmp(ifcall->wname[i], "ctl")) {
+					ofcall.wqid[i].type = QTFILE;
+					ofcall.wqid[i].version = 0;
+					ofcall.wqid[i].path = path = Qctl;
+				}
+				else if (!strcmp(ifcall->wname[i], "data")) {
+					ofcall.wqid[i].type = QTFILE;
+					ofcall.wqid[i].version = 0;
+					ofcall.wqid[i].path = path = Qdata;
+				}
+				else if (!strcmp(ifcall->wname[i], "ifstats")) {
+					ofcall.wqid[i].type = QTFILE;
+					ofcall.wqid[i].version = 0;
+					ofcall.wqid[i].path = path = Qifstats;
+				}
+				else if (!strcmp(ifcall->wname[i], "stats")) {
+					ofcall.wqid[i].type = QTFILE;
+					ofcall.wqid[i].version = 0;
+					ofcall.wqid[i].path = path = Qstats;
+				}
+				else if (!strcmp(ifcall->wname[i], "type")) {
+					ofcall.wqid[i].type = QTFILE;
+					ofcall.wqid[i].version = 0;
+					ofcall.wqid[i].path = path = Qtype;
+				}
+				else {
+					ofcall.type = RError;
+					ofcall.ename = Enofile;
+
+					return &ofcall;
+				}
+			} else {
+				ofcall.type = RError;
+				ofcall.ename = Enofile;
+
+				return &ofcall;
+			}
 			break;
 		}
 	}
@@ -183,6 +258,28 @@ fs_stat(Fcall *ifcall) {
 		ofcall.stat.qid.path = Qstats;
 		ofcall.stat.name = Sstats;
 		break;
+	case Qctl:
+		ofcall.stat.qid.path = Qctl;
+		ofcall.stat.mode = 0660;
+		ofcall.stat.name = Sctl;
+		break;
+	case Qdata:
+		ofcall.stat.qid.path = Qdata;
+		ofcall.stat.mode = 0660;
+		ofcall.stat.name = Sdata;
+		break;
+	case Qtype:
+		ofcall.stat.qid.path = Qtype;
+		ofcall.stat.name = Stype;
+		break;
+	}
+
+	if ((ent->data - QNUM) < nconns) {
+		ofcall.stat.qid.type |= QTDIR;
+		ofcall.stat.qid.path = ent->data;
+		ofcall.stat.mode = 0777 | DMDIR;
+		snprintf(Sconn, 12, "%lu", ent->data - QNUM);
+		ofcall.stat.name = Sconn;
 	}
 
 	return &ofcall;
@@ -221,6 +318,7 @@ static Fcall*
 fs_read(Fcall *ifcall, unsigned char *out) {
 	struct hentry *cur = fs_fid_find(ifcall->fid);
 	Stat stat;
+	unsigned long id;
 
 	ofcall.count = 0;
 
@@ -253,20 +351,35 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		stat.length = 0;
 		stat.uid = stat.gid = stat.muid = Snone;
 
+		for (id = 0; id < nconns; id++) {
+			stat.qid.type |= QTDIR;
+			stat.qid.path = QNUM + id;
+			stat.mode = 0777 | DMDIR;
+			snprintf(Sconn, 12, "%lu", id);
+			stat.name = Sconn;
+			ofcall.count += putstat(out, ofcall.count, &stat);
+		}
+
+		stat.qid.type = QTFILE;
+
 		stat.mode = 0444;
 		stat.name = Saddr;
+		stat.qid.path = Qaddr;
 		ofcall.count += putstat(out, ofcall.count, &stat);
 
 		stat.mode = 0666;
 		stat.name = Sclone;
+		stat.qid.path = Qclone;
 		ofcall.count += putstat(out, ofcall.count, &stat);
 
 		stat.mode = 0444;
 		stat.name = Sifstats;
+		stat.qid.path = Qifstats;
 		ofcall.count += putstat(out, ofcall.count, &stat);
 
 		stat.mode = 0444;
 		stat.name = Sstats;
+		stat.qid.path = Qstats;
 		ofcall.count += putstat(out, ofcall.count, &stat);
 	}
 	else if (((unsigned long)cur->data) == Qaddr) {
@@ -274,10 +387,45 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		ofcall.count = 12;
 	}
 	else if (((unsigned long)cur->data) == Qclone) {
-		ofcall.count = sprintf((char*)out, "%11d ", 0);
+		ofcall.count = sprintf((char*)out, "%11d ", nconns++);
 	}
 	else if (((unsigned long)cur->data) == Qstats) {
 		ofcall.count = read_stats((char*)out);
+	}
+	else if (((unsigned long)cur->data) >= QNUM) {
+		id = (unsigned long)cur->data - QNUM;
+		if (id >= nconns) {
+			ofcall.type = RError;
+			ofcall.ename = Enofile;
+		} else {
+			stat.type = 0;
+			stat.dev = 0;
+			stat.qid.type = QTFILE;
+			stat.atime = 0;
+			stat.mtime = 0;
+			stat.length = 0;
+			stat.uid = stat.gid = stat.muid = Snone;
+
+			stat.mode = 0660;
+			stat.name = Sctl;
+			ofcall.count += putstat(out, ofcall.count, &stat);
+
+			stat.mode = 0660;
+			stat.name = Sdata;
+			ofcall.count += putstat(out, ofcall.count, &stat);
+
+			stat.mode = 0444;
+			stat.name = Sifstats;
+			ofcall.count += putstat(out, ofcall.count, &stat);
+
+			stat.mode = 0444;
+			stat.name = Sstats;
+			ofcall.count += putstat(out, ofcall.count, &stat);
+
+			stat.mode = 0444;
+			stat.name = Stype;
+			ofcall.count += putstat(out, ofcall.count, &stat);
+		}
 	}
 	else {
 		ofcall.type = RError;
@@ -366,7 +514,7 @@ app_main(void)
 	callbacks.wstat = fs_wstat;
 
 	uart_config_t uart_config = {
-		.baud_rate = 115200,
+		.baud_rate = 2000000,
 		.data_bits = UART_DATA_8_BITS,
 		.parity = UART_PARITY_DISABLE,
 		.stop_bits = UART_STOP_BITS_1,

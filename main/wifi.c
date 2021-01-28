@@ -47,7 +47,7 @@ read_stats(char *str)
 			"prom: %d\n"
 			"mbps: %d\n"
 			"addr: %s\n",
-			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, mac);
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, mac);
 
 	return ret;
 }
