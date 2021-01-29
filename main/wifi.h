@@ -1,11 +1,22 @@
 #include "nvs_flash.h"
 #include "esp_wifi.h"
+#include "esp_private/wifi.h"
 
 #define uchar unsigned char
 #define uvlong unsigned long long
 
+#define Eaddrlen 6
+#define WIFIHDRSIZE (2+2+3*6+2)
+
 typedef struct Wkey Wkey;
 typedef struct Wnode Wnode;
+typedef struct Wifipkt Wifipkt;
+
+/* cipher */
+enum {
+	TKIP	= 1,
+	CCMP	= 2,
+};
 
 struct Wkey
 {
@@ -53,9 +64,22 @@ struct Wnode
 	uchar	brsne[258];
 };
 
+struct Wifipkt
+{
+	uchar	fc[2];
+	uchar	dur[2];
+	uchar	a1[Eaddrlen];
+	uchar	a2[Eaddrlen];
+	uchar	a3[Eaddrlen];
+	uchar	seq[2];
+	uchar	a4[Eaddrlen];
+};
+
+
 void init_wifi(void);
 void get_mac_address(char*);
 unsigned long read_stats(char*);
 unsigned long read_ifstats(char*);
+unsigned long read_data(char*);
 void set_essid(char*);
 

@@ -402,6 +402,9 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 	else if (((unsigned long)cur->data) == Qifstats) {
 		ofcall.count = read_ifstats((char*)out);
 	}
+	else if (((unsigned long)cur->data) == Qdata) {
+		ofcall.count = read_data((char*)out);
+	}
 	else if (((unsigned long)cur->data) >= QNUM) {
 		id = (unsigned long)cur->data - QNUM;
 		if (id >= nconns) {
@@ -418,22 +421,27 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 
 			stat.mode = 0660;
 			stat.name = Sctl;
+			stat.qid.path = Qctl;
 			ofcall.count += putstat(out, ofcall.count, &stat);
 
 			stat.mode = 0660;
 			stat.name = Sdata;
+			stat.qid.path = Qdata;
 			ofcall.count += putstat(out, ofcall.count, &stat);
 
 			stat.mode = 0444;
 			stat.name = Sifstats;
+			stat.qid.path = Qifstats;
 			ofcall.count += putstat(out, ofcall.count, &stat);
 
 			stat.mode = 0444;
 			stat.name = Sstats;
+			stat.qid.path = Qstats;
 			ofcall.count += putstat(out, ofcall.count, &stat);
 
 			stat.mode = 0444;
 			stat.name = Stype;
+			stat.qid.path = Qtype;
 			ofcall.count += putstat(out, ofcall.count, &stat);
 		}
 	}
