@@ -1,6 +1,6 @@
 #include "nvs_flash.h"
 #include "esp_wifi.h"
-#include "esp_private/wifi.h"
+#include "NinePea.h"
 
 #define uchar unsigned char
 #define uvlong unsigned long long
@@ -80,6 +80,8 @@ void init_wifi(void);
 void get_mac_address(char*);
 unsigned long read_stats(char*);
 unsigned long read_ifstats(char*);
-unsigned long read_data(char*);
+unsigned long read_data(char*, int);
+unsigned long read_log(char*, unsigned long, unsigned long);
 void set_essid(char*);
+void set_brsne(char*);
 

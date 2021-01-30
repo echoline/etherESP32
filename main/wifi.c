@@ -1,7 +1,6 @@
 #include "wifi.h"
-#include "NinePea.h"
 
-#define DEFAULT_SCAN_LIST_SIZE 100
+#define DEFAULT_SCAN_LIST_SIZE 64
 
 static uint16_t ap_count;
 
@@ -9,7 +8,9 @@ static Wnode *wns;
 static Wnode *bss;
 static uint8_t cur_channel;
 static char *essid;
+static char *brsne;
 static int rssi;
+static char *log;
 
 static char Sconn[] = "connecting";
 static char Sauth[] = "authenticated";
@@ -67,7 +68,7 @@ get_rssi(void)
 char*
 get_essid(void)
 {
-	return essid;
+	return essid? essid: "";
 }
 
 char*
@@ -111,21 +112,8 @@ set_essid(char *in)
 	memcpy(p, essid, n);
 	p += n;
 	*p++ = 0x01;
-	*p++ = 0x08;
-	*p++ = 0x8b;	//Supported Rates: 5.5(B)
-	*p++ = 0x96;	//Supported Rates: 11(B)
-	*p++ = 0x82;	//Supported Rates: 1(B)
+	*p++ = 0x01;
 	*p++ = 0x84;	//Supported Rates: 2(B)
-	*p++ = 0x0c;	//Supported Rates: 6
-	*p++ = 0x18;	//Supported Rates: 12
-	*p++ = 0x30;	//Supported Rates: 24
-	*p++ = 0x60;	//Supported Rates: 48
-	*p++ = 0x32;	//wlan.tag.number => 50
-	*p++ = 0x04;	//wlan.tag.length => 4
-	*p++ = 0x6c;	//Extended Supported Rates: 54
-	*p++ = 0x12;	//Extended Supported Rates: 9
-	*p++ = 0x24;	//Extended Supported Rates: 18
-	*p++ = 0x48;	//Extended Supported Rates: 36
 
 	while(bss == NULL) {
 		ESP_ERROR_CHECK(esp_wifi_set_channel(cur_channel, WIFI_SECOND_CHAN_NONE));
@@ -134,7 +122,18 @@ set_essid(char *in)
 		if (bss == NULL)
 			cur_channel = 1 + ((cur_channel+4) % 13);
 	}
+
 	free(buf);
+}
+
+void
+set_brsne(char *in)
+{
+	if (brsne != NULL)
+		free(brsne);
+	brsne = strdup(in);
+	if (bss != NULL)
+		bss->status = Sconn;
 }
 
 void
@@ -144,6 +143,8 @@ sendauth(void)
 	uint8_t mac[6];
 	uint8_t *buf;
 	uint8_t *p;
+	esp_err_t r;
+	int l;
 
 	ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
 
@@ -162,7 +163,12 @@ sendauth(void)
 	*p++ = 0;
 	*p++ = 0;
 
-	ESP_ERROR_CHECK(esp_wifi_internal_tx(ESP_IF_WIFI_STA, buf, p-buf));
+	r = esp_wifi_80211_tx(ESP_IF_WIFI_STA, buf, p-buf, true);
+	if (r != ESP_OK) {
+		l = strlen(log);
+		log = realloc(log, l + 64);
+		sprintf(&log[l], "sendauth: %s\n", esp_err_to_name(r));
+	}
 	free(buf);
 }
 
@@ -176,6 +182,7 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 	uint8_t mac[6];
 	struct timeval tv;
 	unsigned long now;
+	char str[13];
 
 	gettimeofday(&tv, NULL);
 	now = tv.tv_sec * 1000LL + (tv.tv_usec / 1000LL);
@@ -256,7 +263,7 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 						break;
 					}
 				}
-				if (bss == NULL) {
+				if (bss == NULL && essid != NULL) {
 					if (strcmp(essid, wns[i].ssid) == 0) {
 						bss = &wns[i];
 						bss->status = Sconn;
@@ -265,9 +272,12 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 				}
 			}
 			break;
-		case 0xb0:
-			if (bss->brsnelen > 0)
-				bss->status = Sneedauth;
+		default:
+			w = (Wifipkt*)p;
+			mac2str(str, w->a3);
+			l = strlen(log);
+			log = realloc(log, l + 32);
+			sprintf(&log[l], "%02x:%s\n", p[0], str);
 			break;
 		}
 		break;
@@ -282,7 +292,7 @@ init_wifi(void)
 	wifi_second_chan_t chan;
 	esp_netif_t *sta;
 
-	essid = calloc(1, sizeof(char));
+	log = calloc(1, sizeof(char));
 
 	ESP_ERROR_CHECK(nvs_flash_init());
 
@@ -292,9 +302,13 @@ init_wifi(void)
 	ESP_ERROR_CHECK(esp_netif_attach_wifi_station(sta));
 	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
 	ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
 	ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
 	ESP_ERROR_CHECK(esp_wifi_start());
+
+	ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
 	ESP_ERROR_CHECK(esp_wifi_get_channel(&cur_channel, &chan));
 
@@ -395,8 +409,28 @@ read_ifstats(char *str)
 }
 
 unsigned long
-read_data(char *str)
+read_data(char *str, int type)
 {
+	uint8_t mac[6];
+	uint16_t Keydescrlen = 1+2+2+8+32+16+8+8+16+2;
+
+	if (type == 0x888e && bss != NULL) {
+		ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
+		memcpy(str, mac, 6);
+		memcpy(&str[6], bss->bssid, 6);
+		memcpy(&str[12], "\x88\x8e", 2);
+		str[14] = 0x02; // ???
+		str[15] = 0x03;
+		str[16] = (Keydescrlen >> 8) & 0xFF;
+		str[17] = Keydescrlen & 0xFF;
+		memset(&str[18], '\0', Keydescrlen); // TODO eapol data :(
+		return 18 + Keydescrlen;
+	}
 	return 0;
 }
 
+unsigned long
+read_log(char *out, unsigned long count, unsigned long offset)
+{
+	return snprintf(out, count, "%s", &log[offset]);
+}

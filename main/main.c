@@ -6,7 +6,6 @@
 #include "freertos/task.h"
 #include "NinePea.h"
 #include "wifi.h"
-#include "esp_pthread.h"
 
 static Fcall ofcall;
 static char errstr[64];
@@ -17,17 +16,14 @@ static char Saddr[] = "addr";
 static char Sclone[] = "clone";
 static char Sifstats[] = "ifstats";
 static char Sstats[] = "stats";
+static char Slog[] = "log";
 static char Sctl[] = "ctl";
 static char Sdata[] = "data";
 static char Stype[] = "type";
 static char Sconn[13];
 
-typedef struct {
-	int type;
-} Conn;
-
 static int nconns = 0;
-static Conn *conns = NULL;
+static int *conntypes = NULL;
 
 /* paths */
 
@@ -38,6 +34,7 @@ enum {
 	Qclone,
 	Qifstats,
 	Qstats,
+	Qlog,
 	Qctl,
 	Qdata,
 	Qtype,
@@ -61,7 +58,7 @@ static Fcall*
 fs_walk(Fcall *ifcall) {
 	unsigned long path;
 	struct hentry *ent = fs_fid_find(ifcall->fid);
-	int i, j, l, conn = -1;
+	int i, j, l, conn;
 
 	if (!ent) {
 		ofcall.type = RError;
@@ -71,6 +68,7 @@ fs_walk(Fcall *ifcall) {
 	}
 
 	path = ent->data;
+	conn = ent->conn;
 
 	for (i = 0; i < ifcall->nwname; i++) {
 		switch(path) {
@@ -121,6 +119,11 @@ fs_walk(Fcall *ifcall) {
 				ofcall.wqid[i].type = QTFILE;
 				ofcall.wqid[i].version = 0;
 				ofcall.wqid[i].path = path = Qstats;
+			}
+			else if (!strcmp(ifcall->wname[i], "log")) {
+				ofcall.wqid[i].type = QTFILE;
+				ofcall.wqid[i].version = 0;
+				ofcall.wqid[i].path = path = Qlog;
 			}
 			else {
 				l = strlen(ifcall->wname[i]);
@@ -266,6 +269,10 @@ fs_stat(Fcall *ifcall) {
 		ofcall.stat.qid.path = Qstats;
 		ofcall.stat.name = Sstats;
 		break;
+	case Qlog:
+		ofcall.stat.qid.path = Qlog;
+		ofcall.stat.name = Slog;
+		break;
 	case Qctl:
 		ofcall.stat.qid.path = Qctl;
 		ofcall.stat.mode = 0660;
@@ -386,15 +393,20 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		stat.name = Sstats;
 		stat.qid.path = Qstats;
 		ofcall.count += putstat(out, ofcall.count, &stat);
+
+		stat.mode = 0444;
+		stat.name = Slog;
+		stat.qid.path = Qlog;
+		ofcall.count += putstat(out, ofcall.count, &stat);
 	}
 	else if (((unsigned long)cur->data) == Qaddr) {
 		get_mac_address((char*)out);
 		ofcall.count = 12;
 	}
 	else if (((unsigned long)cur->data) == Qclone) {
-		cur->conn = nconns;
 		ofcall.count = sprintf((char*)out, "%11d ", nconns++);
-		conns = realloc(conns, nconns * sizeof(Conn));
+		conntypes = realloc(conntypes, nconns);
+		conntypes[nconns-1] = -1;
 	}
 	else if (((unsigned long)cur->data) == Qstats) {
 		ofcall.count = read_stats((char*)out);
@@ -402,8 +414,11 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 	else if (((unsigned long)cur->data) == Qifstats) {
 		ofcall.count = read_ifstats((char*)out);
 	}
+	else if (((unsigned long)cur->data) == Qlog) {
+		ofcall.count = read_log((char*)out, ifcall->count, ifcall->offset);
+	}
 	else if (((unsigned long)cur->data) == Qdata) {
-		ofcall.count = read_data((char*)out);
+		ofcall.count = read_data((char*)out, conntypes[cur->conn]);
 	}
 	else if (((unsigned long)cur->data) >= QNUM) {
 		id = (unsigned long)cur->data - QNUM;
@@ -450,7 +465,7 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		ofcall.ename = Enofile;
 	}
 
-	if (ifcall->offset != 0) {
+	if (ifcall->offset != 0 && ((unsigned long)cur->data) != Qdata && ((unsigned long)cur->data) != Qlog) {
 		if (ofcall.count >= ifcall->offset) {
 			memmove(out, &out[ifcall->offset], ofcall.count - ifcall->offset);
 			ofcall.count -= ifcall->offset;
@@ -487,17 +502,26 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 			in[ifcall->count] = '\0';
 			in[strcspn((const char*)in, "\r\n")] = '\0';
 
-			conns[cur->conn].type = strtoul((const char*)&in[8], 0, 0);
+			conntypes[cur->conn] = strtoul((const char*)&in[8], 0, 0);
 
 			ofcall.count = ifcall->count;
 			return &ofcall;
 		}
-		if (conns[cur->conn].type == 0x888e) {
+		if (conntypes[cur->conn] == 0x888e) {
 			if (strncmp((const char*)in, "essid ", 6) == 0) {
 				in[ifcall->count] = '\0';
 				in[strcspn((const char*)in, "\r\n")] = '\0';
 
 				set_essid((char*)&in[6]);
+
+				ofcall.count = ifcall->count;
+				return &ofcall;
+			}
+			else if (strncmp((const char*)in, "auth ", 5) == 0) {
+				in[ifcall->count] = '\0';
+				in[strcspn((const char*)in, "\r\n")] = '\0';
+
+				set_brsne((char*)&in[5]);
 
 				ofcall.count = ifcall->count;
 				return &ofcall;
@@ -532,14 +556,6 @@ fs_wstat(Fcall *ifcall) {
 	return &ofcall;
 }
 
-static void
-sysfatal(int code)
-{
-	while(true) {
-		sleep(1);
-	}
-}
-
 void
 app_main(void)
 {
@@ -550,10 +566,6 @@ app_main(void)
 	unsigned long l;
 
 	Callbacks callbacks;
-
-	esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
-	cfg.stack_size = (4 * 1024);
-	esp_pthread_set_cfg(&cfg);
 
 	init_wifi();
 
@@ -595,7 +607,7 @@ app_main(void)
 
 		// sanity check
 		if (msg[i] & 1 || msglen > MAX_MSG || msg[i] < TVersion || msg[i] > TWStat) {
-			sysfatal(3);
+			continue; // ???
 		}
 
 		do {
