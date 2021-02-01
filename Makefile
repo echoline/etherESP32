@@ -4,6 +4,7 @@
 #
 
 PROJECT_NAME := etherESP32
+EXCLUDE_COMPONENTS := wpa_supplicant
 
 include $(IDF_PATH)/make/project.mk
 

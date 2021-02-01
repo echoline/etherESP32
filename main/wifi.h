@@ -81,7 +81,9 @@ void get_mac_address(char*);
 unsigned long read_stats(char*);
 unsigned long read_ifstats(char*);
 unsigned long read_data(char*, int);
+unsigned long write_data(char*, unsigned long, int);
 unsigned long read_log(char*, unsigned long, unsigned long);
 void set_essid(char*);
 void set_brsne(char*);
+void set_key(char*);
 

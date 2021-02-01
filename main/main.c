@@ -6,6 +6,8 @@
 #include "freertos/task.h"
 #include "NinePea.h"
 #include "wifi.h"
+#include "esp_log.h"
+#include "log.h"
 
 static Fcall ofcall;
 static char errstr[64];
@@ -526,7 +528,21 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 				ofcall.count = ifcall->count;
 				return &ofcall;
 			}
+			else if (strncmp((const char*)in + 2, "key", 3) == 0) {
+				in[ifcall->count] = '\0';
+				in[strcspn((const char*)in, "\r\n")] = '\0';
+
+				set_key((char*)in);
+
+				ofcall.count = ifcall->count;
+				return &ofcall;
+			}
 		}
+	}
+	else if (((unsigned long)cur->data) == Qdata) {
+		ofcall.count = write_data((char*)in, ifcall->count, conntypes[cur->conn]);
+		if (ofcall.count > 0)
+			return &ofcall;
 	}
 
 	ofcall.type = RError;
@@ -567,6 +583,18 @@ app_main(void)
 
 	Callbacks callbacks;
 
+	uart_config_t uart_config = {
+		.baud_rate = 2000000,
+		.data_bits = UART_DATA_8_BITS,
+		.parity = UART_PARITY_DISABLE,
+		.stop_bits = UART_STOP_BITS_1,
+		.flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+		.source_clk = UART_SCLK_APB,
+	};
+	ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0));
+	ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
+
+	esp_log_set_vprintf(&vprintf_etherESP32);
 	init_wifi();
 
 	fs_fid_init(64);
@@ -585,17 +613,6 @@ app_main(void)
 	callbacks.remove = fs_remove;
 	callbacks.stat = fs_stat;
 	callbacks.wstat = fs_wstat;
-
-	uart_config_t uart_config = {
-		.baud_rate = 2000000,
-		.data_bits = UART_DATA_8_BITS,
-		.parity = UART_PARITY_DISABLE,
-		.stop_bits = UART_STOP_BITS_1,
-		.flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-		.source_clk = UART_SCLK_APB,
-	};
-	ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 2048, 0, 0, NULL, 0));
-	ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
 
 	for(;;) {
 		i = 0;

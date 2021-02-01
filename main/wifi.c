@@ -1,8 +1,14 @@
 #include "wifi.h"
+#include "esp_log.h"
+#include "esp_private/wifi.h"
 
 #define DEFAULT_SCAN_LIST_SIZE 64
 
 static uint16_t ap_count;
+
+uint8_t *etherESP32_eapol_data;
+uint32_t etherESP32_eapol_len;
+uint8_t etherESP32_eapol_state;
 
 static Wnode *wns;
 static Wnode *bss;
@@ -10,7 +16,9 @@ static uint8_t cur_channel;
 static char *essid;
 static char *brsne;
 static int rssi;
-static char *log;
+static int status;
+
+extern char *log_etherESP32;
 
 static char Sconn[] = "connecting";
 static char Sauth[] = "authenticated";
@@ -39,6 +47,41 @@ get_status(void)
 	if (bss == NULL || bss->status == NULL)
 		return "";
 	return bss->status;
+}
+
+void
+set_status(int s)
+{
+	if (bss == NULL)
+		return;
+
+	switch(s){
+	case 0:
+		bss->status = Sconn;
+		break;
+	case 1:
+		bss->status = Sauth;
+		break;
+	case 2:
+		bss->status = Sneedauth;
+		break;
+	case 3:
+		bss->status = Sunauth;
+		break;
+	case 4:
+		bss->status = Sassoc;
+		break;
+	case 5:
+		bss->status = Sunassoc;
+		break;
+	case 6:
+		bss->status = Sblocked;
+		break;
+	default:
+		return;
+	}
+
+	status = s;
 }
 
 unsigned long
@@ -117,7 +160,7 @@ set_essid(char *in)
 
 	while(bss == NULL) {
 		ESP_ERROR_CHECK(esp_wifi_set_channel(cur_channel, WIFI_SECOND_CHAN_NONE));
-		ESP_ERROR_CHECK(esp_wifi_80211_tx(ESP_IF_WIFI_STA, buf, p-buf, true));
+		esp_wifi_internal_tx(ESP_IF_WIFI_STA, buf, p-buf);
 		vTaskDelay(200 / portTICK_PERIOD_MS);
 		if (bss == NULL)
 			cur_channel = 1 + ((cur_channel+4) % 13);
@@ -132,44 +175,6 @@ set_brsne(char *in)
 	if (brsne != NULL)
 		free(brsne);
 	brsne = strdup(in);
-	if (bss != NULL)
-		bss->status = Sconn;
-}
-
-void
-sendauth(void)
-{
-	Wifipkt *w;
-	uint8_t mac[6];
-	uint8_t *buf;
-	uint8_t *p;
-	esp_err_t r;
-	int l;
-
-	ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
-
-	buf = calloc(1, WIFIHDRSIZE+3*2);
-	w = (Wifipkt*)buf;
-	w->fc[0] = 0xB0;
-	w->fc[1] = 0x00;
-	memmove(w->a1, bss->bssid, Eaddrlen);
-	memmove(w->a2, mac, Eaddrlen);
-	memmove(w->a3, bss->bssid, Eaddrlen);
-	p = buf + WIFIHDRSIZE;
-	*p++ = 0;
-	*p++ = 0;
-	*p++ = 1;
-	*p++ = 0;
-	*p++ = 0;
-	*p++ = 0;
-
-	r = esp_wifi_80211_tx(ESP_IF_WIFI_STA, buf, p-buf, true);
-	if (r != ESP_OK) {
-		l = strlen(log);
-		log = realloc(log, l + 64);
-		sprintf(&log[l], "sendauth: %s\n", esp_err_to_name(r));
-	}
-	free(buf);
 }
 
 static void
@@ -182,18 +187,18 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 	uint8_t mac[6];
 	struct timeval tv;
 	unsigned long now;
-	char str[13];
+	char str[64];
+	wifi_config_t cfg;
 
 	gettimeofday(&tv, NULL);
 	now = tv.tv_sec * 1000LL + (tv.tv_usec / 1000LL);
-
 	ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
+	w = (Wifipkt*)p;
 
 	switch (type) {
 	case WIFI_PKT_MGMT:
 		switch(p[0] & 0xF0) {
 		case 0x50: // probe response
-			w = (Wifipkt*)p;
 			if (memcmp(mac, w->a1, 6) == 0) {
 				rssi = packet->rx_ctrl.rssi;
 				for (i = 0; i < ap_count && i < DEFAULT_SCAN_LIST_SIZE; i++) {
@@ -211,7 +216,6 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			}
 			break;
 		case 0x80: // beacon
-			w = (Wifipkt*)p;
 			for (i = 0; i < ap_count && i < DEFAULT_SCAN_LIST_SIZE; i++) {
 				if (memcmp(wns[i].bssid, w->a3, 6) == 0)
 					break;
@@ -266,18 +270,45 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 				if (bss == NULL && essid != NULL) {
 					if (strcmp(essid, wns[i].ssid) == 0) {
 						bss = &wns[i];
-						bss->status = Sconn;
-						sendauth();
+						set_status(0);
+						memset(&cfg, 0, sizeof(cfg));
+						snprintf((char*)cfg.sta.ssid, 32, "%s", essid);
+						sprintf((char*)cfg.sta.password, "\xFF");
+						ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &cfg));
+						esp_wifi_connect();
 					}
 				}
 			}
 			break;
+		case 0xB0:
+			if (bss != NULL &&
+			    memcmp(mac, w->a1, 6) == 0 &&
+			    memcmp(bss->bssid, w->a3, 6) == 0) {
+				set_status(1);
+			}
+			break;
+		case 0x10:
+		case 0x30:
+			if (bss != NULL &&
+			    memcmp(mac, w->a1, 6) == 0 &&
+			    memcmp(bss->bssid, w->a3, 6) == 0) {
+				set_status(4);
+			}
+			break;
+		case 0xc0:
+			if (bss != NULL &&
+			    memcmp(mac, w->a1, 6) == 0 &&
+			    memcmp(bss->bssid, w->a3, 6) == 0) {
+				set_status(3);
+				bss = NULL;
+			}
+			break;
 		default:
-			w = (Wifipkt*)p;
-			mac2str(str, w->a3);
-			l = strlen(log);
-			log = realloc(log, l + 32);
-			sprintf(&log[l], "%02x:%s\n", p[0], str);
+			sprintf(str, "%02x:", p[0] & 0xf0);
+			mac2str(str + 3, w->a1);
+			sprintf(str + 15, ":");
+			mac2str(str + 16, w->a3);
+			ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%s", str);
 			break;
 		}
 		break;
@@ -292,7 +323,8 @@ init_wifi(void)
 	wifi_second_chan_t chan;
 	esp_netif_t *sta;
 
-	log = calloc(1, sizeof(char));
+	log_etherESP32 = calloc(1, sizeof(char));
+	etherESP32_eapol_state = 2;
 
 	ESP_ERROR_CHECK(nvs_flash_init());
 
@@ -412,25 +444,59 @@ unsigned long
 read_data(char *str, int type)
 {
 	uint8_t mac[6];
-	uint16_t Keydescrlen = 1+2+2+8+32+16+8+8+16+2;
+	uint32_t l;
 
 	if (type == 0x888e && bss != NULL) {
-		ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
-		memcpy(str, mac, 6);
-		memcpy(&str[6], bss->bssid, 6);
-		memcpy(&str[12], "\x88\x8e", 2);
-		str[14] = 0x02; // ???
-		str[15] = 0x03;
-		str[16] = (Keydescrlen >> 8) & 0xFF;
-		str[17] = Keydescrlen & 0xFF;
-		memset(&str[18], '\0', Keydescrlen); // TODO eapol data :(
-		return 18 + Keydescrlen;
+		while(etherESP32_eapol_state != 2 && status < 3)
+			vTaskDelay(10 / portTICK_PERIOD_MS);
+
+		if (status < 3) {
+			ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
+			memcpy(str, mac, 6);
+			memcpy(&str[6], bss->bssid, 6);
+			memcpy(&str[12], "\x88\x8e", 2);
+			memcpy(&str[14], etherESP32_eapol_data, etherESP32_eapol_len);
+			l = etherESP32_eapol_len;
+			free(etherESP32_eapol_data);
+			etherESP32_eapol_len = 0;
+			etherESP32_eapol_state = 2;
+			return 14 + l;
+		}
 	}
+
+	return 0;
+}
+
+unsigned long
+write_data(char *str, unsigned long length, int type)
+{
+	if (type == 0x888e && bss != NULL) {
+		while(etherESP32_eapol_state != 1 && status < 3)
+			vTaskDelay(10 / portTICK_PERIOD_MS);
+
+		if (status < 3) {
+			etherESP32_eapol_data = malloc(length);
+			memcpy(etherESP32_eapol_data, str, length);
+			etherESP32_eapol_len = length - 14;
+			etherESP32_eapol_state = 3;
+			return length;
+		}
+	}
+
 	return 0;
 }
 
 unsigned long
 read_log(char *out, unsigned long count, unsigned long offset)
 {
-	return snprintf(out, count, "%s", &log[offset]);
+	return snprintf(out, count, "%s", &log_etherESP32[offset]);
+}
+
+void wpa_supplicant_install_ptk_str(char *in);
+
+void
+set_key(char *in)
+{
+	if (strncmp(in+1, "xkey ", 5) == 0)
+		wpa_supplicant_install_ptk_str(in);
 }
