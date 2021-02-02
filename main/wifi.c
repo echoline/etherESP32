@@ -14,7 +14,6 @@ static Wnode *wns;
 static Wnode *bss;
 static uint8_t cur_channel;
 static char *essid;
-static char *brsne;
 static int rssi;
 static int status;
 
@@ -34,6 +33,29 @@ static char *ciphers[] = {
 	[TKIP]	"tkip",
 	[CCMP]	"ccmp",
 };
+
+int
+hextob(char *s, char **sp, uint8_t *b, int n)
+{
+	int r;
+
+	n <<= 1;
+	for(r = 0; r < n && *s; s++){
+		*b <<= 4;
+		if(*s >= '0' && *s <= '9')
+			*b |= (*s - '0');
+		else if(*s >= 'a' && *s <= 'f')
+			*b |= 10+(*s - 'a');
+		else if(*s >= 'A' && *s <= 'F')
+			*b |= 10+(*s - 'A');
+		else break;
+		if((++r & 1) == 0)
+			b++;
+	}
+	if(sp != NULL)
+		*sp = s;
+	return r >> 1;
+}
 
 void
 mac2str(char *str, uint8_t *mac)
@@ -172,9 +194,47 @@ set_essid(char *in)
 void
 set_brsne(char *in)
 {
-	if (brsne != NULL)
-		free(brsne);
-	brsne = strdup(in);
+	int l;
+	if (bss != NULL) {
+		l = strlen(in);
+		l >>= 1;
+		bss->rsnelen = hextob(in, NULL, bss->rsne, l);
+	}
+}
+
+static uint8_t*
+srcaddr(Wifipkt *w)
+{
+	if((w->fc[1] & 0x02) == 0)
+		return w->a2;
+	if((w->fc[1] & 0x01) == 0)
+		return w->a3;
+	return w->a4;
+}
+
+static uint8_t*
+dstaddr(Wifipkt *w)
+{
+	if((w->fc[1] & 0x01) != 0)
+		return w->a3;
+	return w->a1;
+}
+
+int
+wifihdrlen(Wifipkt *w)
+{
+	int n;
+
+	n = WIFIHDRSIZE;
+	if((w->fc[0] & 0x0c) == 0x08)
+		if((w->fc[0] & 0xf0) == 0x80){	/* QOS */
+			n += 2;
+			if(w->fc[1] & 0x80)
+				n += 4;
+		}
+	if((w->fc[1] & 3) == 0x03)
+		n += Eaddrlen;
+	return n;
 }
 
 static void
@@ -197,118 +257,113 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 
 	switch (type) {
 	case WIFI_PKT_MGMT:
+		sprintf(str, "%02x:", p[0]);
+		mac2str(str + 3, srcaddr(w));
+		sprintf(str + 15, ">");
+		mac2str(str + 16, dstaddr(w));
+		ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%s", str);
+		for (i = 0; i < ap_count && i < DEFAULT_SCAN_LIST_SIZE; i++) {
+			if (memcmp(wns[i].bssid, srcaddr(w), 6) == 0) {
+				wns[i].lastseen = now;
+				break;
+			}
+		}
+		if (i == DEFAULT_SCAN_LIST_SIZE)
+			break;
 		switch(p[0] & 0xF0) {
 		case 0x50: // probe response
-			if (memcmp(mac, w->a1, 6) == 0) {
-				rssi = packet->rx_ctrl.rssi;
-				for (i = 0; i < ap_count && i < DEFAULT_SCAN_LIST_SIZE; i++) {
-					if (memcmp(wns[i].bssid, w->a3, 6) == 0)
-						break;
-				}
-				if (i < DEFAULT_SCAN_LIST_SIZE) {
-					if (i == ap_count)
-						ap_count++;
-					memcpy(wns[i].bssid, w->a3, 6);
-					wns[i].lastseen = now;
-					wns[i].channel = cur_channel;
-					memcpy(wns[i].ssid, essid, strlen(essid));
-				}
-			}
+			if (i == ap_count)
+				ap_count++;
+			memcpy(wns[i].bssid, srcaddr(w), 6);
+			wns[i].channel = cur_channel;
+			memcpy(wns[i].ssid, essid, strlen(essid));
 			break;
 		case 0x80: // beacon
-			for (i = 0; i < ap_count && i < DEFAULT_SCAN_LIST_SIZE; i++) {
-				if (memcmp(wns[i].bssid, w->a3, 6) == 0)
+			if (i == ap_count)
+				ap_count++;
+			memcpy(wns[i].bssid, srcaddr(w), 6);
+			wns[i].channel = cur_channel;
+			p += wifihdrlen(w);
+			wns[i].cap = (p[11] << 8) | p[10];
+			l = p[13];
+			if (l > 32)
+				l = 32;
+			memcpy(wns[i].ssid, &p[14], l);
+			l = 14 + p[13];
+			while (((p - packet->payload) + l) < (packet->rx_ctrl.sig_len - 4)) {
+				switch(p[l]) {
+				case 1: // rates
+				case 50:
+					l++;
+					l += p[l] + 1;
 					break;
-			}
-			if (i < DEFAULT_SCAN_LIST_SIZE) {
-				if (i == ap_count)
-					ap_count++;
-				memcpy(wns[i].bssid, w->a3, 6);
-				wns[i].lastseen = now;
-				wns[i].channel = cur_channel;
-				wns[i].cap = (p[WIFIHDRSIZE+11] << 8) | p[WIFIHDRSIZE+10];
-				l = p[WIFIHDRSIZE+13];
-				if (l > 32)
-					l = 32;
-				memcpy(wns[i].ssid, &p[WIFIHDRSIZE+14], l);
-				l = WIFIHDRSIZE + 14 + p[WIFIHDRSIZE+13];
-				while (l < (packet->rx_ctrl.sig_len-4)) {
-					switch(p[l]) {
-					case 1: // rates
-					case 50:
-						l++;
-						l += p[l] + 1;
+				case 3:
+					l++;
+					if (p[l] != 0)
+						if (p[l+1] != wns[i].channel)
+							wns[i].channel = p[l+1];
+					l += p[l] + 1;
+					break;
+				case 5:
+					l++;
+					l += p[l] + 1;
+					break;
+				case 221: // ???
+					l++;
+					l += p[l] + 1;
+					if (rsnset)
 						break;
-					case 3:
-						l++;
-						if (p[l] != 0)
-							if (p[l+1] != wns[i].channel)
-								wns[i].channel = p[l+1];
-						l += p[l] + 1;
-						break;
-					case 5:
-						l++;
-						l += p[l] + 1;
-						break;
-					case 221: // ???
-						l++;
-						l += p[l] + 1;
-						if (rsnset)
-							break;
-					case 48:
-						wns[i].brsnelen = p[l+1] + 2;
-						memcpy(wns[i].brsne, &p[l], wns[i].brsnelen);
-						rsnset = 1;
-						l += wns[i].brsnelen;
-						break;
-					default:
-						l++;
-						l += p[l] + 1;
-						break;
-					}
+				case 48:
+					wns[i].brsnelen = p[l+1] + 2;
+					memcpy(wns[i].brsne, &p[l], wns[i].brsnelen);
+					rsnset = 1;
+					l += wns[i].brsnelen;
+					break;
+				default:
+					l++;
+					l += p[l] + 1;
+					break;
 				}
-				if (bss == NULL && essid != NULL) {
-					if (strcmp(essid, wns[i].ssid) == 0) {
-						bss = &wns[i];
-						set_status(0);
-						memset(&cfg, 0, sizeof(cfg));
-						snprintf((char*)cfg.sta.ssid, 32, "%s", essid);
-						sprintf((char*)cfg.sta.password, "\xFF");
-						ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &cfg));
-						esp_wifi_connect();
-					}
+			}
+			if (bss == NULL && essid != NULL) {
+				if (strcmp(essid, wns[i].ssid) == 0) {
+					bss = &wns[i];
+					set_status(0);
+					memset(&cfg, 0, sizeof(cfg));
+					snprintf((char*)cfg.sta.ssid, 32, "%s", essid);
+					sprintf((char*)cfg.sta.password, "\xFF");
+					ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &cfg));
+					esp_wifi_connect();
 				}
 			}
 			break;
 		case 0xB0:
 			if (bss != NULL &&
-			    memcmp(mac, w->a1, 6) == 0 &&
-			    memcmp(bss->bssid, w->a3, 6) == 0) {
-				set_status(1);
+			    memcmp(mac, dstaddr(w), 6) == 0 &&
+			    memcmp(bss->bssid, srcaddr(w), 6) == 0) {
+				if (bss->brsnelen > 0 && bss->rsnelen == 0)
+					set_status(2);
+				else
+					set_status(1);
 			}
 			break;
 		case 0x10:
 		case 0x30:
 			if (bss != NULL &&
-			    memcmp(mac, w->a1, 6) == 0 &&
-			    memcmp(bss->bssid, w->a3, 6) == 0) {
-				set_status(4);
+			    memcmp(bss->bssid, srcaddr(w), 6) == 0 &&
+			    memcmp(mac, dstaddr(w), 6) == 0) {
+				
 			}
 			break;
 		case 0xc0:
 			if (bss != NULL &&
-			    memcmp(mac, w->a1, 6) == 0 &&
-			    memcmp(bss->bssid, w->a3, 6) == 0) {
+			    memcmp(mac, dstaddr(w), 6) == 0 &&
+			    memcmp(bss->bssid, srcaddr(w), 6) == 0) {
 				set_status(3);
 				bss = NULL;
 			}
 			break;
 		default:
-			sprintf(str, "%02x:", p[0] & 0xf0);
-			mac2str(str + 3, w->a1);
-			sprintf(str + 15, ":");
-			mac2str(str + 16, w->a3);
-			ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%s", str);
 			break;
 		}
 		break;
@@ -324,7 +379,7 @@ init_wifi(void)
 	esp_netif_t *sta;
 
 	log_etherESP32 = calloc(1, sizeof(char));
-	etherESP32_eapol_state = 2;
+	etherESP32_eapol_state = 0;
 
 	ESP_ERROR_CHECK(nvs_flash_init());
 
@@ -447,21 +502,19 @@ read_data(char *str, int type)
 	uint32_t l;
 
 	if (type == 0x888e && bss != NULL) {
-		while(etherESP32_eapol_state != 2 && status < 3)
+		while(etherESP32_eapol_state != 1)
 			vTaskDelay(10 / portTICK_PERIOD_MS);
 
-		if (status < 3) {
-			ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
-			memcpy(str, mac, 6);
-			memcpy(&str[6], bss->bssid, 6);
-			memcpy(&str[12], "\x88\x8e", 2);
-			memcpy(&str[14], etherESP32_eapol_data, etherESP32_eapol_len);
-			l = etherESP32_eapol_len;
-			free(etherESP32_eapol_data);
-			etherESP32_eapol_len = 0;
-			etherESP32_eapol_state = 2;
-			return 14 + l;
-		}
+		ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
+		memcpy(str, mac, 6);
+		memcpy(&str[6], bss->bssid, 6);
+		memcpy(&str[12], "\x88\x8e", 2);
+		memcpy(&str[14], etherESP32_eapol_data, etherESP32_eapol_len);
+		l = etherESP32_eapol_len;
+		free(etherESP32_eapol_data);
+		etherESP32_eapol_len = 0;
+		etherESP32_eapol_state = 2;
+		return 14 + l;
 	}
 
 	return 0;
@@ -471,16 +524,14 @@ unsigned long
 write_data(char *str, unsigned long length, int type)
 {
 	if (type == 0x888e && bss != NULL) {
-		while(etherESP32_eapol_state != 1 && status < 3)
+		while(etherESP32_eapol_state != 2)
 			vTaskDelay(10 / portTICK_PERIOD_MS);
 
-		if (status < 3) {
-			etherESP32_eapol_data = malloc(length);
-			memcpy(etherESP32_eapol_data, str, length);
-			etherESP32_eapol_len = length - 14;
-			etherESP32_eapol_state = 3;
-			return length;
-		}
+		etherESP32_eapol_data = malloc(length);
+		memcpy(etherESP32_eapol_data, str, length);
+		etherESP32_eapol_len = length - 14;
+		etherESP32_eapol_state = 3;
+		return length;
 	}
 
 	return 0;
@@ -492,11 +543,63 @@ read_log(char *out, unsigned long count, unsigned long offset)
 	return snprintf(out, count, "%s", &log_etherESP32[offset]);
 }
 
-void wpa_supplicant_install_ptk_str(char *in);
+void wpa_supplicant_install_ptk_wkey(Wkey*);
+void wpa_supplicant_install_gtk_wkey(Wkey*);
 
 void
-set_key(char *in)
+set_key_str(char *in)
 {
-	if (strncmp(in+1, "xkey ", 5) == 0)
-		wpa_supplicant_install_ptk_str(in);
+	Wkey *wkey;
+	char *p; 
+	int k = 4;
+	uchar isptk = 0;
+
+	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wpa", "%s", in);
+
+	if (bss == NULL)
+		return;
+
+	if (strncmp(in+1, "xkey", 4) == 0) {
+		wkey = calloc(1, sizeof(Wkey) + 32);
+
+		if (isdigit(in[5]))
+			k = atoi(&in[5]);
+		else if (in[5] == ' ')
+			isptk = 1;
+
+		if ((p = strstr(in, "ccmp:")) != NULL) {
+			wkey->cipher = CCMP;
+			wkey->len = 16;
+		}
+		else if ((p = strstr(in, "tkip:")) != NULL) {
+			wkey->cipher = TKIP;
+			wkey->len = 32;
+		}
+		else {
+			free(wkey);
+			return;
+		}
+
+		hextob(p+5, NULL, wkey->key, wkey->len);
+
+		if (in[0] == 't') {
+			if (bss->txkey[0] != NULL)
+				free(bss->txkey[0]);
+			bss->txkey[0] = wkey;
+		}
+		else if (in[0] == 'r') {
+			if (bss->rxkey[k] != NULL)
+				free(bss->rxkey[k]);
+			bss->rxkey[k] = wkey;
+		}
+		else {
+			free(wkey);
+			return;
+		}
+
+		if (isptk != 0)
+			wpa_supplicant_install_ptk_wkey(wkey);
+		else
+			wpa_supplicant_install_gtk_wkey(wkey);
+	}
 }

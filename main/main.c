@@ -528,11 +528,11 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 				ofcall.count = ifcall->count;
 				return &ofcall;
 			}
-			else if (strncmp((const char*)in + 2, "key", 3) == 0) {
+			else if (strncmp((const char*)(&in[2]), "key", 3) == 0) {
 				in[ifcall->count] = '\0';
 				in[strcspn((const char*)in, "\r\n")] = '\0';
 
-				set_key((char*)in);
+				set_key_str((char*)in);
 
 				ofcall.count = ifcall->count;
 				return &ofcall;

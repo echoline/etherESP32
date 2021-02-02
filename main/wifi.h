@@ -85,5 +85,5 @@ unsigned long write_data(char*, unsigned long, int);
 unsigned long read_log(char*, unsigned long, unsigned long);
 void set_essid(char*);
 void set_brsne(char*);
-void set_key(char*);
+void set_key_str(char*);
 
