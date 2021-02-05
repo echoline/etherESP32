@@ -9,7 +9,6 @@
 #include "esp_log.h"
 #include "log.h"
 
-static Fcall ofcall;
 static char errstr[64];
 static char Snone[] = "esp32";
 static char Sroot[] = "/";
@@ -26,6 +25,15 @@ static char Sconn[13];
 
 static int nconns = 0;
 static int *conntypes = NULL;
+
+static int tasks = 0;
+
+typedef struct {
+	unsigned char *msg;
+	unsigned long len;
+} msg9p;
+
+SemaphoreHandle_t sendMutex = NULL;
 
 /* paths */
 
@@ -47,6 +55,8 @@ enum {
 
 static Fcall*
 fs_attach(Fcall *ifcall) {
+	static Fcall ofcall;
+
 	ofcall.qid.type = QTDIR | QTTMP;
 	ofcall.qid.version = 0;
 	ofcall.qid.path = Qroot;
@@ -61,6 +71,7 @@ fs_walk(Fcall *ifcall) {
 	unsigned long path;
 	struct hentry *ent = fs_fid_find(ifcall->fid);
 	int i, j, l, conn;
+	static Fcall ofcall;
 
 	if (!ent) {
 		ofcall.type = RError;
@@ -226,6 +237,7 @@ fs_walk(Fcall *ifcall) {
 static Fcall*
 fs_stat(Fcall *ifcall) {
 	struct hentry *ent;
+	static Fcall ofcall;
 
 	if ((ent = fs_fid_find(ifcall->fid)) == NULL) {
 		ofcall.type = RError;
@@ -311,6 +323,7 @@ fs_clunk(Fcall *ifcall) {
 
 static Fcall*
 fs_open(Fcall *ifcall) {
+	static Fcall ofcall;
 	struct hentry *cur = fs_fid_find(ifcall->fid);
 
 	if (cur == NULL) {
@@ -341,6 +354,7 @@ fs_open(Fcall *ifcall) {
 
 static Fcall*
 fs_read(Fcall *ifcall, unsigned char *out) {
+	static Fcall ofcall;
 	struct hentry *cur = fs_fid_find(ifcall->fid);
 	Stat stat;
 	unsigned long id;
@@ -488,6 +502,8 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 
 static Fcall*
 fs_create(Fcall *ifcall) {
+	static Fcall ofcall;
+
 	ofcall.type = RError;
 	ofcall.ename = Eperm;
 
@@ -497,6 +513,7 @@ fs_create(Fcall *ifcall) {
 static Fcall*
 fs_write(Fcall *ifcall, unsigned char *in) {
 	struct hentry *cur = fs_fid_find(ifcall->fid);
+	static Fcall ofcall;
 
 	if (cur == NULL) {
 		ofcall.type = RError;
@@ -525,11 +542,14 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 				ofcall.count = ifcall->count;
 				return &ofcall;
 			}
-			else if (strncmp((const char*)in, "auth ", 5) == 0) {
+			else if (strncmp((const char*)in, "auth", 4) == 0) {
 				in[ifcall->count] = '\0';
 				in[strcspn((const char*)in, "\r\n")] = '\0';
 
-				set_brsne((char*)&in[5]);
+				if (in[4] == ' ')
+					set_brsne((char*)&in[5]);
+				else if (in[4] == '\0')
+					set_brsne((char*)&in[4]);
 
 				ofcall.count = ifcall->count;
 				return &ofcall;
@@ -559,6 +579,8 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 
 static Fcall*
 fs_remove(Fcall *ifcall) {
+	static Fcall ofcall;
+
 	ofcall.type = RError;
 	ofcall.ename = Eperm;
 
@@ -572,6 +594,8 @@ fs_flush(Fcall *ifcall) {
 
 static Fcall*
 fs_wstat(Fcall *ifcall) {
+	static Fcall ofcall;
+
 	ofcall.type = RError;
 	ofcall.ename = Eperm;
 
@@ -579,15 +603,52 @@ fs_wstat(Fcall *ifcall) {
 }
 
 void
+runNinePea(void *arg)
+{
+	msg9p *msg = (msg9p*)arg;
+
+	Callbacks callbacks;
+
+	// this is REQUIRED by proc9p (see below)
+	callbacks.attach = fs_attach;
+	callbacks.flush = fs_flush;
+	callbacks.walk = fs_walk;
+	callbacks.open = fs_open;
+	callbacks.create = fs_create;
+	callbacks.read = fs_read;
+	callbacks.write = fs_write;
+	callbacks.clunk = fs_clunk;
+	callbacks.remove = fs_remove;
+	callbacks.stat = fs_stat;
+	callbacks.wstat = fs_wstat;
+
+	// proc9p accepts valid 9P msgs of length msglen,
+	// processes them using callbacks->various(functions);
+	// returns variable out's msglen
+	msg->len = proc9p(msg->msg, msg->len, &callbacks);
+ 
+	while(xSemaphoreTake(sendMutex, 20 / portTICK_RATE_MS) != pdTRUE);
+
+	uart_write_bytes(UART_NUM_0, "9P", 2);
+	uart_write_bytes(UART_NUM_0, (const char*)msg->msg, msg->len);
+
+	xSemaphoreGive(sendMutex);
+
+	free(msg->msg);
+	free(msg);
+
+	tasks--;
+	vTaskDelete(NULL);
+}
+
+void
 app_main(void)
 {
-	uint8_t *msg;
-	unsigned long msglen = 0;
+	msg9p *msg;
 	unsigned long r = 0;
 	unsigned long i;
 	unsigned long l;
-
-	Callbacks callbacks;
+	char taskName[32];
 
 	uart_config_t uart_config = {
 		.baud_rate = 2000000,
@@ -605,51 +666,37 @@ app_main(void)
 
 	fs_fid_init(64);
 
-	// this is REQUIRED by proc9p (see below)
-	callbacks.attach = fs_attach;
-	callbacks.flush = fs_flush;
-	callbacks.walk = fs_walk;
-	callbacks.open = fs_open;
-	callbacks.create = fs_create;
-	callbacks.read = fs_read;
-	callbacks.write = fs_write;
-	callbacks.clunk = fs_clunk;
-	callbacks.remove = fs_remove;
-	callbacks.stat = fs_stat;
-	callbacks.wstat = fs_wstat;
+	vSemaphoreCreateBinary(sendMutex);
 
 	for(;;) {
-		msg = malloc(MAX_MSG+1);
+		msg = calloc(1, sizeof(msg9p));
+		msg->msg = malloc(MAX_MSG+1);
 
 		i = 0;
 		do {
-			l = uart_read_bytes(UART_NUM_0, &msg[r], 5 - r, 20 / portTICK_RATE_MS);
+			l = uart_read_bytes(UART_NUM_0, &msg->msg[r], 5 - r, 20 / portTICK_RATE_MS);
 			r += l;
 		} while (r < 5);
-		get4(msg, i, msglen);
+		get4(msg->msg, i, msg->len);
 
 		// sanity check
-		if (msg[i] & 1 || msglen > MAX_MSG || msg[i] < TVersion || msg[i] > TWStat) {
+		if (msg->msg[i] & 1 || msg->len > MAX_MSG || msg->msg[i] < TVersion || msg->msg[i] > TWStat) {
 			continue; // ???
 		}
 
 		do {
-			l = uart_read_bytes(UART_NUM_0, &msg[r], msglen - r, 20 / portTICK_RATE_MS);
+			l = uart_read_bytes(UART_NUM_0, &msg->msg[r], msg->len - r, 20 / portTICK_RATE_MS);
 			r += l;
-		} while (r < msglen);
+		} while (r < msg->len);
 
-		memset(&ofcall, 0, sizeof(ofcall));
+		tasks++;
+		while (tasks > 4)
+			vTaskDelay(10 / portTICK_RATE_MS);
 
-		// proc9p accepts valid 9P msgs of length msglen,
-		// processes them using callbacks->various(functions);
-		// returns variable out's msglen
-		msglen = proc9p(msg, msglen, &callbacks);
+		snprintf(taskName, 32, "NinePea%d", tasks);
+		xTaskCreate(runNinePea, taskName, 4096, msg, tskIDLE_PRIORITY, NULL);
 
-		uart_write_bytes(UART_NUM_0, "9P", 2);
-		uart_write_bytes(UART_NUM_0, (const char*)msg, msglen);
-
-		r = msglen = 0;
-		free(msg);
+		r = 0;
 	}
 }
 

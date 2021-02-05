@@ -245,6 +245,10 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			mac2str(str + 18, dstaddr(w));
 			ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%s", str);
 		}
+		if (bss != NULL &&
+		    memcmp(srcaddr(w), bss->bssid, 6) == 0) {
+			rssi = packet->rx_ctrl.rssi;
+		}
 		switch(p[0] & 0xF0) {
 		case 0x50: // probe response
 		case 0x80: // beacon

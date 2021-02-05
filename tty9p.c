@@ -90,8 +90,8 @@ main(int argc, char **argv)
 				exits("readn in 2");
 			inlen += 4;
 			write(1, in, inlen);
-//			if (debug)
-//				write(2, in, inlen);
+			if (debug)
+				write(2, in, inlen);
 		}
 	}
 	else {
@@ -104,8 +104,8 @@ main(int argc, char **argv)
 				exits("readn out 2");
 			outlen += 4;
 			write(fd, out, outlen);
-//			if (debug)
-//				write(2, out, outlen);
+			if (debug)
+				write(2, out, outlen);
 		}
 	}
 }
