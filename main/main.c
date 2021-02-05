@@ -327,6 +327,14 @@ fs_open(Fcall *ifcall) {
 		ofcall.qid.type = QTDIR;
 	else if (cur->data == Qether)
 		ofcall.qid.type = QTDIR;
+	else if (cur->data == Qclone) {
+		cur->conn = nconns;
+		cur->data = Qctl;
+		ofcall.qid.path = Qctl;
+		nconns++;
+		conntypes = realloc(conntypes, nconns);
+		conntypes[cur->conn] = 0;
+	}
 
 	return &ofcall;
 }
@@ -405,10 +413,8 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		get_mac_address((char*)out);
 		ofcall.count = 12;
 	}
-	else if (((unsigned long)cur->data) == Qclone) {
-		ofcall.count = sprintf((char*)out, "%11d ", nconns++);
-		conntypes = realloc(conntypes, nconns);
-		conntypes[nconns-1] = -1;
+	else if (((unsigned long)cur->data) == Qctl) {
+		ofcall.count = sprintf((char*)out, "%11d ", cur->conn);
 	}
 	else if (((unsigned long)cur->data) == Qstats) {
 		ofcall.count = read_stats((char*)out);
@@ -499,7 +505,7 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 		return &ofcall;
 	}
 
-	if (((unsigned long)cur->data) == Qclone) {
+	if (((unsigned long)cur->data) == Qctl) {
 		if (strncmp((const char*)in, "connect ", 8) == 0) {
 			in[ifcall->count] = '\0';
 			in[strcspn((const char*)in, "\r\n")] = '\0';
@@ -599,8 +605,6 @@ app_main(void)
 
 	fs_fid_init(64);
 
-	msg = malloc(MAX_MSG+1);
-
 	// this is REQUIRED by proc9p (see below)
 	callbacks.attach = fs_attach;
 	callbacks.flush = fs_flush;
@@ -615,6 +619,8 @@ app_main(void)
 	callbacks.wstat = fs_wstat;
 
 	for(;;) {
+		msg = malloc(MAX_MSG+1);
+
 		i = 0;
 		do {
 			l = uart_read_bytes(UART_NUM_0, &msg[r], 5 - r, 20 / portTICK_RATE_MS);
@@ -639,9 +645,11 @@ app_main(void)
 		// returns variable out's msglen
 		msglen = proc9p(msg, msglen, &callbacks);
 
+		uart_write_bytes(UART_NUM_0, "9P", 2);
 		uart_write_bytes(UART_NUM_0, (const char*)msg, msglen);
 
 		r = msglen = 0;
+		free(msg);
 	}
 }
 

@@ -63,6 +63,7 @@ void  wpa_sm_free_eapol(u8 *buffer)
 
 void  wpa_sm_deauthenticate(struct wpa_sm *sm, u8 reason_code)
 {
+    wpa_printf(MSG_DEBUG, "deauth: %d", reason_code);
 
     /*only need send deauth frame when associated*/
     if (WPA_SM_STATE(sm) >= WPA_ASSOCIATED) {

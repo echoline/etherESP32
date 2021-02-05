@@ -223,11 +223,8 @@ void   wpa_eapol_key_send(struct wpa_sm *sm, const u8 *kck,
          #endif    
         goto out;
     }
-    wpa_hexdump(MSG_MSGDUMP, "WPA: TX EAPOL-Key (fake)", msg, msg_len);
-
-    wpa_hexdump(MSG_MSGDUMP, "WPA: TX EAPOL-Key", etherESP32_eapol_data + 14, etherESP32_eapol_len);
-    wpa_sm_ether_send(sm, dest, proto, etherESP32_eapol_data + 14, etherESP32_eapol_len);
-
+    wpa_hexdump(MSG_MSGDUMP, "WPA: TX EAPOL-Key", msg, msg_len);
+    wpa_sm_ether_send(sm, dest, proto, msg, msg_len);
 out:
     return;
 }
@@ -498,6 +495,9 @@ int   wpa_supplicant_send_2_of_4(struct wpa_sm *sm, const unsigned char *dst,
     size_t rlen;
     struct wpa_eapol_key *reply;
     u8 *rbuf;
+    struct wpa_eapol_key *outkey;
+
+    outkey = (struct wpa_eapol_key*)(etherESP32_eapol_data + sizeof(struct l2_ethhdr) + sizeof(struct ieee802_1x_hdr));
 
     if (wpa_ie == NULL) {
        #ifdef DEBUG_PRINT    
@@ -512,12 +512,11 @@ int   wpa_supplicant_send_2_of_4(struct wpa_sm *sm, const unsigned char *dst,
     rbuf = wpa_sm_alloc_eapol(sm, IEEE802_1X_TYPE_EAPOL_KEY,
                   NULL, sizeof(*reply) + wpa_ie_len,
                   &rlen, (void *) &reply);
-    //rbuf = etherESP32_eapol_data + 14;
-    //rlen = etherESP32_eapol_len;
-    //reply = (struct wpa_eapol_key*)rbuf;
     if (rbuf == NULL) {
         return -1;
     }
+
+    wpa_hexdump(MSG_MSGDUMP, "WPA: TX EAPOL-Key (orig)", (u8*)outkey - sizeof(struct ieee802_1x_hdr), rlen);
 
     reply->type = sm->proto == WPA_PROTO_RSN ?
         EAPOL_KEY_TYPE_RSN : EAPOL_KEY_TYPE_WPA;
@@ -527,6 +526,9 @@ int   wpa_supplicant_send_2_of_4(struct wpa_sm *sm, const unsigned char *dst,
         WPA_PUT_BE16(reply->key_length, 0);
     else
         memcpy(reply->key_length, key->key_length, 2);
+
+    memcpy(reply->key_mic, outkey->key_mic, 16);
+    memcpy(reply->key_length, outkey->key_length, 16);
 
     memcpy(reply->replay_counter, key->replay_counter,
           WPA_REPLAY_COUNTER_LEN);
@@ -538,8 +540,8 @@ int   wpa_supplicant_send_2_of_4(struct wpa_sm *sm, const unsigned char *dst,
     
     wpa_printf(MSG_DEBUG, "WPA Send EAPOL-Key 2/4\n");
     
-    wpa_eapol_key_send(sm, ptk->kck, ver, dst, ETH_P_EAPOL,
-               rbuf, rlen, reply->key_mic);
+    wpa_eapol_key_send(sm, NULL, ver, dst, ETH_P_EAPOL,
+               rbuf, rlen, NULL); //reply->key_mic);
     wpa_sm_free_eapol(rbuf);
 
     return 0;
@@ -566,6 +568,14 @@ void   wpa_supplicant_process_1_of_4(struct wpa_sm *sm,
     struct wpa_eapol_ie_parse ie;
     struct wpa_ptk *ptk;
     int res;
+    struct wpa_eapol_key *outkey;
+
+    wpa_printf(MSG_DEBUG, "eapol_state: %d", etherESP32_eapol_state);
+
+    while(etherESP32_eapol_state != 3)
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+
+    outkey = (struct wpa_eapol_key*)(etherESP32_eapol_data + sizeof(struct l2_ethhdr) + sizeof(struct ieee802_1x_hdr));
 
     wpa_sm_set_state(WPA_FIRST_HALF_4WAY_HANDSHAKE);
 
@@ -603,15 +613,17 @@ void   wpa_supplicant_process_1_of_4(struct wpa_sm *sm,
         pmksa_cache_set_current(sm, NULL, sm->bssid, 0, 0);
     }
 
-    memcpy(sm->anonce, key->key_nonce, WPA_NONCE_LEN);
-
     if (sm->renew_snonce) {
-/*        if (os_get_random(sm->snonce, WPA_NONCE_LEN)) {
+#if 0
+        if (os_get_random(sm->snonce, WPA_NONCE_LEN)) {
          #ifdef DEBUG_PRINT            
             wpa_printf(MSG_DEBUG, "WPA: Failed to get random data for SNonce");
          #endif     
             goto failed;
-        }*/
+        }
+#endif
+
+	memcpy(sm->snonce, outkey->key_nonce, WPA_NONCE_LEN);
          
         sm->renew_snonce = 0;
         wpa_hexdump(MSG_DEBUG, "WPA: Renewed SNonce",
@@ -621,17 +633,18 @@ void   wpa_supplicant_process_1_of_4(struct wpa_sm *sm,
     /* Calculate PTK which will be stored as a temporary PTK until it has
      * been verified when processing message 3/4. */
     ptk = &sm->tptk;
-    wpa_derive_ptk(sm, src_addr, key, ptk);
+    //wpa_derive_ptk(sm, src_addr, key, ptk);
     /* Supplicant: swap tx/rx Mic keys */
     sm->tptk_set = 1;
     sm->ptk_set = 0;
-    sm->key_install = true;
+//    sm->key_install = true;
 
     if (wpa_supplicant_send_2_of_4(sm, sm->bssid, key, ver, sm->snonce,
                        sm->assoc_wpa_ie, sm->assoc_wpa_ie_len,
                        ptk))
         goto failed;
 
+    memcpy(sm->anonce, key->key_nonce, WPA_NONCE_LEN);
     return;
 
 failed:
@@ -1126,6 +1139,14 @@ int   ieee80211w_set_keys(struct wpa_sm *sm,
     size_t rlen;
     struct wpa_eapol_key *reply;
     u8 *rbuf;
+    struct wpa_eapol_key *outkey;
+
+    wpa_printf(MSG_DEBUG, "eapol_state: %d", etherESP32_eapol_state);
+
+    while(etherESP32_eapol_state != 3)
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+
+    outkey = (struct wpa_eapol_key*)(etherESP32_eapol_data + sizeof(struct l2_ethhdr) + sizeof(struct ieee802_1x_hdr));
 
     if (kde)
         wpa_hexdump(MSG_DEBUG, "WPA: KDE for msg 4/4", kde, kde_len);
@@ -1151,13 +1172,19 @@ int   ieee80211w_set_keys(struct wpa_sm *sm,
     memcpy(reply->replay_counter, key->replay_counter,
           WPA_REPLAY_COUNTER_LEN);
 
+    memcpy(reply->key_mic, outkey->key_mic, 16);
+    memcpy(reply->key_length, outkey->key_length, 16);
+
     WPA_PUT_BE16(reply->key_data_length, kde_len);
     if (kde)
         memcpy(reply + 1, kde, kde_len);
 
+    wpa_hexdump(MSG_MSGDUMP, "WPA: TX EAPOL-Key (orig)", (u8*)outkey - sizeof(struct ieee802_1x_hdr), rlen);
+
     wpa_printf(MSG_DEBUG, "WPA Send EAPOL-Key 4/4\n");
+
     wpa_eapol_key_send(sm, ptk->kck, ver, dst, ETH_P_EAPOL,
-               rbuf, rlen, reply->key_mic);
+               rbuf, rlen, NULL); //reply->key_mic);
     wpa_sm_free_eapol(rbuf);
 
     return 0;
@@ -1286,6 +1313,7 @@ failed:
 {
        u16 key_info=sm->key_info;
 
+#if 0
     if (sm->key_install && key_info & WPA_KEY_INFO_INSTALL) {
         if (wpa_supplicant_install_ptk(sm))
             goto failed;
@@ -1304,9 +1332,12 @@ failed:
     	else {
     	    wpa_printf(MSG_DEBUG, "GTK has been installed, it may be an attack, ignor it.");
     	}
+#endif
         wpa_supplicant_key_neg_complete(sm, sm->bssid,
                     key_info & WPA_KEY_INFO_SECURE);
+#if 0
     }
+#endif
 
 
     if (key_info & WPA_KEY_INFO_SECURE) {
@@ -1319,8 +1350,10 @@ failed:
 
     return 0;
 
+#if 0
 failed:
        return WLAN_REASON_UNSPECIFIED; 
+#endif
 }
 
 
@@ -1595,17 +1628,19 @@ failed:
 
     memcpy(mic, key->key_mic, 16);
     if (sm->tptk_set) {
-        memset(key->key_mic, 0, 16);
-        wpa_eapol_key_mic(sm->tptk.kck, ver, buf, len,
-                  key->key_mic);
+//        memset(key->key_mic, 0, 16);
+//        wpa_eapol_key_mic(sm->tptk.kck, ver, buf, len,
+//                  key->key_mic);
         if (memcmp(mic, key->key_mic, 16) != 0) {
+           #ifdef DEBUG_PRINT        
             wpa_printf(MSG_DEBUG, "WPA: Invalid EAPOL-Key MIC "
                    "when using TPTK - ignoring TPTK");
+           #endif
         } else {
             ok = 1;
-            sm->tptk_set = 0;
-            sm->ptk_set = 1;
-            memcpy(&sm->ptk, &sm->tptk, sizeof(sm->ptk));
+//            sm->tptk_set = 0;
+//            sm->ptk_set = 1;
+//            memcpy(&sm->ptk, &sm->tptk, sizeof(sm->ptk));
         }
     }
 
@@ -1624,8 +1659,10 @@ failed:
     }
 
     if (!ok) {
+        #ifdef DEBUG_PRINT    
         wpa_printf(MSG_DEBUG, "WPA: Could not verify EAPOL-Key MIC "
                "- dropping packet");
+         #endif    
         return -1;
     }
 
@@ -1647,10 +1684,6 @@ failed:
 
     wpa_hexdump(MSG_DEBUG, "RSN: encrypted key data",
             (u8 *) (key + 1), keydatalen);
-
-    while (!sm->ptk_set)
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-
     if (!sm->ptk_set) {
         #ifdef DEBUG_PRINT    
         wpa_printf(MSG_DEBUG, "WPA: PTK not available, "
@@ -1771,7 +1804,6 @@ int   wpa_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len)
     u32 plen, data_len, extra_len;
     struct ieee802_1x_hdr *hdr;
     struct wpa_eapol_key *key;
-    struct wpa_eapol_key *outkey;
     u16 key_info, ver;
     u8 *tmp;
     int ret = -1;
@@ -1788,6 +1820,8 @@ int   wpa_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len)
     
        tmp = buf;
 
+    wpa_printf(MSG_DEBUG, "eapol_state: %d", etherESP32_eapol_state);
+
     while(etherESP32_eapol_state != 0)
         vTaskDelay(10 / portTICK_PERIOD_MS);
 
@@ -1796,19 +1830,10 @@ int   wpa_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len)
     etherESP32_eapol_len = len;
     etherESP32_eapol_state = 1;
 
-    wpa_hexdump(MSG_MSGDUMP, "WPA: RX EAPOL-Key", etherESP32_eapol_data, etherESP32_eapol_len);
-
-    while(etherESP32_eapol_state != 3)
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-
     hdr = (struct ieee802_1x_hdr *) tmp;
     key = (struct wpa_eapol_key *) (hdr + 1);
     plen = be_to_host16(hdr->length);
     data_len = plen + sizeof(*hdr);
-
-    outkey = (struct wpa_eapol_key *) (etherESP32_eapol_data + 14);
-    memcpy(sm->request_counter, outkey->replay_counter, WPA_REPLAY_COUNTER_LEN);
-    memcpy(sm->snonce, outkey->key_nonce, WPA_NONCE_LEN);
 
 #ifdef DEBUG_PRINT    
     wpa_printf(MSG_DEBUG, "IEEE 802.1X RX: version=%d type=%d length=%d\n",
@@ -1947,12 +1972,14 @@ int   wpa_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len)
     }
     extra_len = WPA_GET_BE16(key->key_data_length);
 
+#if 0
     if (sm->proto == WPA_PROTO_RSN &&
         (key_info & WPA_KEY_INFO_ENCR_KEY_DATA)) {
         if (wpa_supplicant_decrypt_key_data(sm, key, ver))
             goto out;
         extra_len = WPA_GET_BE16(key->key_data_length);
     }
+#endif
 
     if (key_info & WPA_KEY_INFO_KEY_TYPE) {
         if (key_info & WPA_KEY_INFO_KEY_INDEX_MASK) {
@@ -2082,7 +2109,6 @@ bool wpa_sm_init(char * payload, WPA_SEND_FUNC snd_func,
 {
     struct wpa_sm *sm = &gWpaSm;
 
-    sm->proto = WPA_PROTO_RSN;
     sm->eapol_version = 0x2;   /* DEFAULT_EAPOL_VERSION */    
     sm->sendto = snd_func;
     sm->config_assoc_ie = set_assoc_ie_func;
@@ -2453,26 +2479,37 @@ struct Wkey
 };
 
 void wpa_supplicant_install_ptk_wkey(Wkey *wkey) {
-    if (wkey->cipher == CCMP) {
+    if (wkey->cipher == CCMP)
         gWpaSm.pairwise_cipher = WPA_CIPHER_CCMP;
-    }
-    else if (wkey->cipher == TKIP) {
+    else if (wkey->cipher == TKIP)
         gWpaSm.pairwise_cipher = WPA_CIPHER_TKIP;
-    }
     else
-	return;
+        return;
 
-    memcpy(gWpaSm.ptk.tk1, wkey->key, wkey->len);
-
-    assert(wpa_supplicant_install_ptk(&gWpaSm) == 0);
-
-    memcpy(&gWpaSm.tptk, &gWpaSm.ptk, sizeof(gWpaSm.tptk));
-
+    memcpy(gWpaSm.ptk.kek, wkey->key, wkey->len);
     gWpaSm.tptk_set = 0;
     gWpaSm.ptk_set = 1;
 }
 
-void wpa_supplicant_install_gtk_wkey(Wkey *wkey) {
+void wpa_supplicant_install_gtk_wkey(Wkey *wkey, int idx) {
+#if 0
+    if (wkey->cipher == CCMP) {
+        gWpaSm.group_cipher = WPA_CIPHER_CCMP;
+	gWpaSm.gd.alg = WPA_ALG_CCMP;
+    }
+    else if (wkey->cipher == TKIP) {
+        gWpaSm.group_cipher = WPA_CIPHER_TKIP;
+	gWpaSm.gd.alg = WPA_ALG_TKIP;
+    }
+    else
+	return;
+
+    gWpaSm.gd.keyidx = idx;
+    gWpaSm.gd.gtk_len = wkey->len;
+    memcpy(gWpaSm.gd.gtk, wkey->key, wkey->len);
+
+    wpa_supplicant_install_gtk(&gWpaSm, &gWpaSm.gd);
+#endif
 }
 
 #endif // ESP_SUPPLICANT

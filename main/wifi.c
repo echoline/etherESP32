@@ -2,6 +2,8 @@
 #include "esp_log.h"
 #include "esp_private/wifi.h"
 
+void esp_wifi_deauthenticate_internal(unsigned char);
+
 #define DEFAULT_SCAN_LIST_SIZE 64
 
 static uint16_t ap_count;
@@ -15,7 +17,6 @@ static Wnode *bss;
 static uint8_t cur_channel;
 static char *essid;
 static int rssi;
-static int status;
 
 extern char *log_etherESP32;
 
@@ -71,41 +72,6 @@ get_status(void)
 	return bss->status;
 }
 
-void
-set_status(int s)
-{
-	if (bss == NULL)
-		return;
-
-	switch(s){
-	case 0:
-		bss->status = Sconn;
-		break;
-	case 1:
-		bss->status = Sauth;
-		break;
-	case 2:
-		bss->status = Sneedauth;
-		break;
-	case 3:
-		bss->status = Sunauth;
-		break;
-	case 4:
-		bss->status = Sassoc;
-		break;
-	case 5:
-		bss->status = Sunassoc;
-		break;
-	case 6:
-		bss->status = Sblocked;
-		break;
-	default:
-		return;
-	}
-
-	status = s;
-}
-
 unsigned long
 inpkts(void)
 {
@@ -148,7 +114,7 @@ get_bssid(void)
 }
 
 void
-set_essid(char *in)
+sendbeacon(void)
 {
 	Wifipkt *w;
 	uint8_t mac[6];
@@ -157,10 +123,6 @@ set_essid(char *in)
 	int n;
 
 	ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
-
-	if (essid != NULL)
-		free(essid);
-	essid = strndup(in, 32);
 
 	n = strlen(essid);
 
@@ -189,6 +151,16 @@ set_essid(char *in)
 	}
 
 	free(buf);
+}
+
+void
+set_essid(char *in)
+{
+	if (essid != NULL)
+		free(essid);
+	essid = strndup(in, 32);
+
+	sendbeacon();
 }
 
 void
@@ -257,11 +229,6 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 
 	switch (type) {
 	case WIFI_PKT_MGMT:
-		sprintf(str, "%02x:", p[0]);
-		mac2str(str + 3, srcaddr(w));
-		sprintf(str + 15, ">");
-		mac2str(str + 16, dstaddr(w));
-		ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%s", str);
 		for (i = 0; i < ap_count && i < DEFAULT_SCAN_LIST_SIZE; i++) {
 			if (memcmp(wns[i].bssid, srcaddr(w), 6) == 0) {
 				wns[i].lastseen = now;
@@ -270,14 +237,16 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 		}
 		if (i == DEFAULT_SCAN_LIST_SIZE)
 			break;
+		if (memcmp(srcaddr(w), mac, 6) == 0 ||
+		    memcmp(dstaddr(w), mac, 6) == 0) {
+			sprintf(str, "%02x%02x:", p[0], p[1]);
+			mac2str(str + 5, srcaddr(w));
+			sprintf(str + 17, ">");
+			mac2str(str + 18, dstaddr(w));
+			ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%s", str);
+		}
 		switch(p[0] & 0xF0) {
 		case 0x50: // probe response
-			if (i == ap_count)
-				ap_count++;
-			memcpy(wns[i].bssid, srcaddr(w), 6);
-			wns[i].channel = cur_channel;
-			memcpy(wns[i].ssid, essid, strlen(essid));
-			break;
 		case 0x80: // beacon
 			if (i == ap_count)
 				ap_count++;
@@ -328,7 +297,7 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			if (bss == NULL && essid != NULL) {
 				if (strcmp(essid, wns[i].ssid) == 0) {
 					bss = &wns[i];
-					set_status(0);
+					bss->status = Sconn;
 					memset(&cfg, 0, sizeof(cfg));
 					snprintf((char*)cfg.sta.ssid, 32, "%s", essid);
 					sprintf((char*)cfg.sta.password, "\xFF");
@@ -342,9 +311,9 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			    memcmp(mac, dstaddr(w), 6) == 0 &&
 			    memcmp(bss->bssid, srcaddr(w), 6) == 0) {
 				if (bss->brsnelen > 0 && bss->rsnelen == 0)
-					set_status(2);
+					bss->status = Sneedauth;
 				else
-					set_status(1);
+					bss->status = Sauth;
 			}
 			break;
 		case 0x10:
@@ -352,14 +321,30 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			if (bss != NULL &&
 			    memcmp(bss->bssid, srcaddr(w), 6) == 0 &&
 			    memcmp(mac, dstaddr(w), 6) == 0) {
-				
+				p += wifihdrlen(w);
+				p += 2;
+				l = p[0] | (p[1] << 8);
+				p += 2;
+				switch(l) {
+				case 0x00:
+					bss->aid = p[0] | (p[1] << 8);
+					if (bss->rsnelen > 0)
+						bss->status = Sblocked;
+					else
+						bss->status = Sassoc;
+					break;
+				default:
+					bss->aid = 0;
+					bss->status = Sunassoc;
+					break;
+				}
 			}
 			break;
 		case 0xc0:
 			if (bss != NULL &&
 			    memcmp(mac, dstaddr(w), 6) == 0 &&
 			    memcmp(bss->bssid, srcaddr(w), 6) == 0) {
-				set_status(3);
+				esp_wifi_deauthenticate_internal(1);
 				bss = NULL;
 			}
 			break;
@@ -397,6 +382,8 @@ init_wifi(void)
 
 	ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
+	cur_channel = 11;
+	ESP_ERROR_CHECK(esp_wifi_set_channel(cur_channel, WIFI_SECOND_CHAN_NONE));
 	ESP_ERROR_CHECK(esp_wifi_get_channel(&cur_channel, &chan));
 
 	ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
@@ -544,17 +531,16 @@ read_log(char *out, unsigned long count, unsigned long offset)
 }
 
 void wpa_supplicant_install_ptk_wkey(Wkey*);
-void wpa_supplicant_install_gtk_wkey(Wkey*);
+void wpa_supplicant_install_gtk_wkey(Wkey*, int);
 
 void
 set_key_str(char *in)
 {
 	Wkey *wkey;
 	char *p; 
+	char *e;
 	int k = 4;
 	uchar isptk = 0;
-
-	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wpa", "%s", in);
 
 	if (bss == NULL)
 		return;
@@ -580,7 +566,14 @@ set_key_str(char *in)
 			return;
 		}
 
-		hextob(p+5, NULL, wkey->key, wkey->len);
+		hextob(p+5, &e, wkey->key, wkey->len);
+
+		if (*e++ != '@') {
+			free(wkey);
+			return;
+		}
+
+		wkey->tsc = strtol(e, NULL, 16);
 
 		if (in[0] == 't') {
 			if (bss->txkey[0] != NULL)
@@ -600,6 +593,8 @@ set_key_str(char *in)
 		if (isptk != 0)
 			wpa_supplicant_install_ptk_wkey(wkey);
 		else
-			wpa_supplicant_install_gtk_wkey(wkey);
+			wpa_supplicant_install_gtk_wkey(wkey, k);
 	}
+
+	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wpa", "%s", in);
 }

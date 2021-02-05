@@ -14,7 +14,6 @@
 
 #ifndef RANDOM_H
 #define RANDOM_H
-#include "esp_log.h"
 
 #define CONFIG_NO_RANDOM_POOL
 
@@ -22,10 +21,7 @@
 #define random_init(e) do { } while (0)
 #define random_deinit() do { } while (0)
 #define random_add_randomness(b, l) do { } while (0)
-inline int random_get_bytes(unsigned char *b, size_t l) {
-	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "os_get_random");
-	return os_get_random((b), (l));
-}
+#define random_get_bytes(b, l) os_get_random((b), (l))
 #define random_pool_ready() 1
 #define random_mark_pool_ready() do { } while (0)
 #else /* CONFIG_NO_RANDOM_POOL */

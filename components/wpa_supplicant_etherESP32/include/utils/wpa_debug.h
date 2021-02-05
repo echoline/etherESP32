@@ -14,7 +14,6 @@
 
 #ifndef WPA_DEBUG_H
 #define WPA_DEBUG_H
-#define DEBUG_PRINT
 
 #include "wpabuf.h"
 #include "esp_log.h"
