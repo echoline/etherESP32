@@ -291,8 +291,8 @@ void   wpa_sm_key_request(struct wpa_sm *sm, int error, int pairwise)
            error, pairwise, sm->ptk_set, (unsigned long) rlen);
    #endif
     wpa_eapol_key_send(sm, sm->ptk.kck, ver, bssid, ETH_P_EAPOL,
-               rbuf, rlen, key_info & WPA_KEY_INFO_MIC ?
-               reply->key_mic : NULL);
+               rbuf, rlen, NULL); //key_info & WPA_KEY_INFO_MIC ?
+               //reply->key_mic : NULL);
     wpa_sm_free_eapol(rbuf);
 }
 /*
@@ -570,7 +570,7 @@ void   wpa_supplicant_process_1_of_4(struct wpa_sm *sm,
     int res;
     struct wpa_eapol_key *outkey;
 
-    wpa_printf(MSG_DEBUG, "eapol_state: %d", etherESP32_eapol_state);
+    wpa_printf(MSG_DEBUG, "eapol_state: tx1: %d", etherESP32_eapol_state);
 
     while(etherESP32_eapol_state != 3)
         vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -1141,7 +1141,7 @@ int   ieee80211w_set_keys(struct wpa_sm *sm,
     u8 *rbuf;
     struct wpa_eapol_key *outkey;
 
-    wpa_printf(MSG_DEBUG, "eapol_state: %d", etherESP32_eapol_state);
+    wpa_printf(MSG_DEBUG, "eapol_state: tx2: %d", etherESP32_eapol_state);
 
     while(etherESP32_eapol_state != 3)
         vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -1321,9 +1321,13 @@ failed:
     else if (sm->key_install == false) {
         wpa_printf(MSG_DEBUG, "PTK has been installed, it may be an attack, ignor it.");
     }
+#endif
 
     wpa_sm_set_state(WPA_GROUP_HANDSHAKE);
-    
+
+    while((sm->gd).gtk_len == 0)
+        vTaskDelay(10 / portTICK_RATE_MS);
+
     if((sm->gd).gtk_len) {
     	if (sm->key_install) {
           if (wpa_supplicant_install_gtk(sm, &(sm->gd))) 
@@ -1332,12 +1336,9 @@ failed:
     	else {
     	    wpa_printf(MSG_DEBUG, "GTK has been installed, it may be an attack, ignor it.");
     	}
-#endif
         wpa_supplicant_key_neg_complete(sm, sm->bssid,
                     key_info & WPA_KEY_INFO_SECURE);
-#if 0
     }
-#endif
 
 
     if (key_info & WPA_KEY_INFO_SECURE) {
@@ -1350,10 +1351,8 @@ failed:
 
     return 0;
 
-#if 0
 failed:
        return WLAN_REASON_UNSPECIFIED; 
-#endif
 }
 
 
@@ -1536,7 +1535,7 @@ failed:
     wpa_printf(MSG_DEBUG, "WPA Send 2/2 Group key\n");
 
     wpa_eapol_key_send(sm, sm->ptk.kck, ver, sm->bssid, ETH_P_EAPOL,
-               rbuf, rlen, reply->key_mic);
+               rbuf, rlen, NULL); //reply->key_mic);
     wpa_sm_free_eapol(rbuf);
 
     return 0;
@@ -1820,7 +1819,7 @@ int   wpa_sm_rx_eapol(u8 *src_addr, u8 *buf, u32 len)
     
        tmp = buf;
 
-    wpa_printf(MSG_DEBUG, "eapol_state: %d", etherESP32_eapol_state);
+    wpa_printf(MSG_DEBUG, "eapol_state: rx: %d", etherESP32_eapol_state);
 
     while(etherESP32_eapol_state != 0)
         vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -2492,7 +2491,9 @@ void wpa_supplicant_install_ptk_wkey(Wkey *wkey) {
 }
 
 void wpa_supplicant_install_gtk_wkey(Wkey *wkey, int idx) {
-#if 0
+    uint8_t tsc[WPA_KEY_RSC_LEN];
+    int i;
+
     if (wkey->cipher == CCMP) {
         gWpaSm.group_cipher = WPA_CIPHER_CCMP;
 	gWpaSm.gd.alg = WPA_ALG_CCMP;
@@ -2504,12 +2505,18 @@ void wpa_supplicant_install_gtk_wkey(Wkey *wkey, int idx) {
     else
 	return;
 
-    gWpaSm.gd.keyidx = idx;
-    gWpaSm.gd.gtk_len = wkey->len;
+    gWpaSm.gd.key_rsc_len = 6;
+
+    memset(tsc, 0, WPA_KEY_RSC_LEN);
+    for(i = 0; i < 6; i++)
+        tsc[i] = wkey->tsc >> ((5-i)*8);
+    memcpy(gWpaSm.install_gtk.seq, tsc, WPA_KEY_RSC_LEN);
+
     memcpy(gWpaSm.gd.gtk, wkey->key, wkey->len);
 
-    wpa_supplicant_install_gtk(&gWpaSm, &gWpaSm.gd);
-#endif
+    gWpaSm.key_install = true;
+    gWpaSm.gd.keyidx = idx;
+    gWpaSm.gd.gtk_len = wkey->len;
 }
 
 #endif // ESP_SUPPLICANT

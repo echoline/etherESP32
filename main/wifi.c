@@ -2,8 +2,6 @@
 #include "esp_log.h"
 #include "esp_private/wifi.h"
 
-void esp_wifi_deauthenticate_internal(unsigned char);
-
 #define DEFAULT_SCAN_LIST_SIZE 64
 
 static uint16_t ap_count;
@@ -81,6 +79,8 @@ inpkts(void)
 int
 linkstatus(void)
 {
+	if (bss != NULL && (bss->status == Sassoc || bss->status == Sblocked))
+		return 1;
 	return 0;
 }
 
@@ -298,15 +298,17 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 					break;
 				}
 			}
-			if (bss == NULL && essid != NULL) {
-				if (strcmp(essid, wns[i].ssid) == 0) {
-					bss = &wns[i];
-					bss->status = Sconn;
-					memset(&cfg, 0, sizeof(cfg));
-					snprintf((char*)cfg.sta.ssid, 32, "%s", essid);
-					sprintf((char*)cfg.sta.password, "\xFF");
-					ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &cfg));
-					esp_wifi_connect();
+			if (essid != NULL) {
+				if (bss == NULL) {
+					if (strcmp(essid, wns[i].ssid) == 0) {
+						bss = &wns[i];
+						bss->status = Sconn;
+						memset(&cfg, 0, sizeof(cfg));
+						snprintf((char*)cfg.sta.ssid, 32, "%s", essid);
+						sprintf((char*)cfg.sta.password, "\xFF");
+						ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &cfg));
+						esp_wifi_connect();
+					}
 				}
 			}
 			break;
@@ -348,8 +350,26 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			if (bss != NULL &&
 			    memcmp(mac, dstaddr(w), 6) == 0 &&
 			    memcmp(bss->bssid, srcaddr(w), 6) == 0) {
-				esp_wifi_deauthenticate_internal(1);
+				bss->status = Sunauth;
+				bss->aid = 0;
+
+				if (bss->txkey[0]) {
+					free(bss->txkey[0]);
+					bss->txkey[0] = NULL;
+				}
+				for (l = 0; l < 5; l++)
+					if (bss->rxkey[l]) {
+						free(bss->rxkey[l]);
+						bss->rxkey[l] = NULL;
+					}
+
 				bss = NULL;
+
+				while(etherESP32_eapol_state != 0)
+					vTaskDelay(10 / portTICK_PERIOD_MS);
+
+				etherESP32_eapol_len = 0;
+				etherESP32_eapol_state = 1;
 			}
 			break;
 		default:
@@ -495,6 +515,11 @@ read_data(char *str, int type)
 	if (type == 0x888e && bss != NULL) {
 		while(etherESP32_eapol_state != 1)
 			vTaskDelay(10 / portTICK_PERIOD_MS);
+
+		if (etherESP32_eapol_len == 0) { 
+			etherESP32_eapol_state = 0;
+			return 0;
+		}
 
 		ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
 		memcpy(str, mac, 6);

@@ -74,13 +74,13 @@ main(int argc, char **argv)
 		exits("fork");
 	else if (pid == 0) {
 		while(1) {
-			while (readn(fd, in+1, 1) == 1) {
+/*			while (readn(fd, in+1, 1) == 1) {
 				if (debug)
 					write(2, in+1, 1);
 				if (strncmp(in, "9P", 2) == 0)
 					break;
 				memmove(in, in+1, 1);
-			}
+			}*/
 			if (readn(fd, in, 4) != 4) {
 				exits("readn in 1");
 			}	

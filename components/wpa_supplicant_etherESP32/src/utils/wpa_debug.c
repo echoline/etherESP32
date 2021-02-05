@@ -91,8 +91,8 @@ void  wpa_hexdump(int level, const char *title, const u8 *buf, size_t len)
 	size_t i;
 	char output[50];
 
-	if (level < MSG_MSGDUMP)
-		return;
+//	if (level < MSG_MSGDUMP)
+//		return;
 
 	wpa_printf(MSG_DEBUG, "%s - hexdump(len=%lu):", title, (unsigned long) len);
 	if (buf == NULL) {

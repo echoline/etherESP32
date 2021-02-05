@@ -629,7 +629,7 @@ runNinePea(void *arg)
  
 	while(xSemaphoreTake(sendMutex, 20 / portTICK_RATE_MS) != pdTRUE);
 
-	uart_write_bytes(UART_NUM_0, "9P", 2);
+//	uart_write_bytes(UART_NUM_0, "9P", 2);
 	uart_write_bytes(UART_NUM_0, (const char*)msg->msg, msg->len);
 
 	xSemaphoreGive(sendMutex);
@@ -690,9 +690,6 @@ app_main(void)
 		} while (r < msg->len);
 
 		tasks++;
-		while (tasks > 4)
-			vTaskDelay(10 / portTICK_RATE_MS);
-
 		snprintf(taskName, 32, "NinePea%d", tasks);
 		xTaskCreate(runNinePea, taskName, 4096, msg, tskIDLE_PRIORITY, NULL);
 
