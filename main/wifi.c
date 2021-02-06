@@ -40,6 +40,9 @@ static eth_pkt *eth86dd;
 uint8_t read800;
 uint8_t read806;
 uint8_t read86dd;
+SemaphoreHandle_t mutex800 = NULL;
+SemaphoreHandle_t mutex806 = NULL;
+SemaphoreHandle_t mutex86dd = NULL;
 
 static char *ciphers[] = {
 	[0]	"clear",
@@ -413,12 +416,9 @@ static esp_err_t pkt_wifi2eth(void *buffer, uint16_t len, void *eb)
 {
 	uint8_t *data = (uint8_t*)buffer;
 	uint16_t type = (data[12] << 8) | data[13];
-	uint8_t mac[6];
 	eth_pkt *pkt;
 
 	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%04x", type);
-
-	ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
 
 	switch(type) {
 	case 0x800:
@@ -427,7 +427,9 @@ static esp_err_t pkt_wifi2eth(void *buffer, uint16_t len, void *eb)
 			pkt->msg = calloc(1, sizeof(len));
 			pkt->len = len;
 			memcpy(pkt->msg, data, len);
+			while(xSemaphoreTake(mutex800, 20 / portTICK_RATE_MS) != pdTRUE);
 			addpkt(&eth800, pkt);
+			xSemaphoreGive(mutex800);
 		}
 		break;
 	case 0x806:
@@ -436,7 +438,9 @@ static esp_err_t pkt_wifi2eth(void *buffer, uint16_t len, void *eb)
 			pkt->msg = calloc(1, sizeof(len));
 			pkt->len = len;
 			memcpy(pkt->msg, data, len);
+			while(xSemaphoreTake(mutex806, 20 / portTICK_RATE_MS) != pdTRUE);
 			addpkt(&eth806, pkt);
+			xSemaphoreGive(mutex806);
 		}
 		break;
 	case 0x86dd:
@@ -445,7 +449,9 @@ static esp_err_t pkt_wifi2eth(void *buffer, uint16_t len, void *eb)
 			pkt->msg = calloc(1, sizeof(len));
 			pkt->len = len;
 			memcpy(pkt->msg, data, len);
+			while(xSemaphoreTake(mutex86dd, 20 / portTICK_RATE_MS) != pdTRUE);
 			addpkt(&eth86dd, pkt);
+			xSemaphoreGive(mutex86dd);
 		}
 		break;
 	}
@@ -481,6 +487,9 @@ init_wifi(void)
 	ESP_ERROR_CHECK(nvs_flash_init());
 
 	read800 = read806 = read86dd = 0;
+	vSemaphoreCreateBinary(mutex800);
+	vSemaphoreCreateBinary(mutex806);
+	vSemaphoreCreateBinary(mutex86dd);
 
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
 	ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
@@ -617,7 +626,7 @@ unsigned long
 read_data(char *str, int type)
 {
 	uint8_t mac[6];
-	uint32_t l;
+	unsigned long l;
 
 	if (bss != NULL) {
 		switch (type) {
@@ -641,11 +650,20 @@ read_data(char *str, int type)
 			etherESP32_eapol_state = 2;
 			return 14 + l;
 		case 0x800:
-			return getpkt(str, &eth800);
+			while(xSemaphoreTake(mutex800, 20 / portTICK_RATE_MS) != pdTRUE);
+			l = getpkt(str, &eth800);
+			xSemaphoreGive(mutex800);
+			return l;
 		case 0x806:
-			return getpkt(str, &eth806);
+			while(xSemaphoreTake(mutex806, 20 / portTICK_RATE_MS) != pdTRUE);
+			l = getpkt(str, &eth806);
+			xSemaphoreGive(mutex806);
+			return l;
 		case 0x86dd:
-			return getpkt(str, &eth86dd);
+			while(xSemaphoreTake(mutex86dd, 20 / portTICK_RATE_MS) != pdTRUE);
+			l = getpkt(str, &eth86dd);
+			xSemaphoreGive(mutex86dd);
+			return l;
 		default:
 			return 0;
 		}
