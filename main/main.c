@@ -28,6 +28,10 @@ static int *conntypes = NULL;
 
 static int tasks = 0;
 
+extern uint8_t read800;
+extern uint8_t read806;
+extern uint8_t read86dd;
+
 typedef struct {
 	unsigned char *msg;
 	unsigned long len;
@@ -56,12 +60,15 @@ enum {
 static Fcall*
 fs_attach(Fcall *ifcall) {
 	static Fcall ofcall;
+	struct hentry *ent;
 
 	ofcall.qid.type = QTDIR | QTTMP;
 	ofcall.qid.version = 0;
 	ofcall.qid.path = Qroot;
 
 	fs_fid_add(ifcall->fid, Qroot);
+	ent = fs_fid_find(ifcall->fid);
+	ent->conn = -1;
 
 	return &ofcall;
 }
@@ -321,6 +328,21 @@ fs_stat(Fcall *ifcall) {
 
 static Fcall*
 fs_clunk(Fcall *ifcall) {
+	struct hentry *cur = fs_fid_find(ifcall->fid);
+	if (cur->data == Qdata && cur->conn != -1) {
+		switch(conntypes[cur->conn]) {
+		case 0x800:
+			read800 = 0;
+			break;
+		case 0x806:
+			read806 = 0;
+			break;
+		case 0x86dd:
+			read86dd = 0;
+			break;
+		}
+	}
+
 	fs_fid_del(ifcall->fid);
 
 	return ifcall;
@@ -351,6 +373,19 @@ fs_open(Fcall *ifcall) {
 		nconns++;
 		conntypes = realloc(conntypes, nconns);
 		conntypes[cur->conn] = 0;
+	}
+	else if (cur->data == Qdata) {
+		switch (conntypes[cur->conn]) {
+		case 0x800:
+			read800 = 1;
+			break;
+		case 0x806:
+			read806 = 1;
+			break;
+		case 0x86dd:
+			read86dd = 1;
+			break;
+		}
 	}
 
 	return &ofcall;
@@ -521,6 +556,8 @@ static Fcall*
 fs_write(Fcall *ifcall, unsigned char *in) {
 	struct hentry *cur = fs_fid_find(ifcall->fid);
 	static Fcall ofcall;
+	int i;
+	int type;
 
 	if (cur == NULL) {
 		ofcall.type = RError;
@@ -536,8 +573,9 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 		ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "ctl", "type:0x%04x: %s", conntypes[cur->conn], in);
 
 		if (strncmp((const char*)in, "connect ", 8) == 0) {
-			conntypes[cur->conn] = strtoul((const char*)&in[8], 0, 0);
+			type = strtoul((const char*)&in[8], 0, 0);
 
+			conntypes[cur->conn] = type;
 			ofcall.count = ifcall->count;
 			return &ofcall;
 		}
@@ -672,7 +710,7 @@ app_main(void)
 	ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0));
 	ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
 
-//	esp_log_set_vprintf(&vprintf_etherESP32);
+	esp_log_set_vprintf(&vprintf_etherESP32);
 	init_wifi();
 
 	fs_fid_init(64);

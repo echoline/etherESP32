@@ -1,11 +1,8 @@
 #include "wifi.h"
 #include "esp_log.h"
 #include "esp_private/wifi.h"
-#include "esp_netif_net_stack.h"
 
 #define DEFAULT_SCAN_LIST_SIZE 64
-
-static esp_netif_t *sta;
 
 static uint16_t ap_count;
 
@@ -29,6 +26,20 @@ static char Sunauth[] = "unauthenticated";
 static char Sassoc[] = "associated";
 static char Sunassoc[] = "unassociated";
 static char Sblocked[] = "blocked";	/* no keys negotiated. only pass EAPOL frames */
+
+typedef struct eth_pkt eth_pkt;
+struct eth_pkt {
+	uint8_t *msg;
+	int len;
+	eth_pkt *next;
+};
+
+static eth_pkt *eth800;
+static eth_pkt *eth806;
+static eth_pkt *eth86dd;
+uint8_t read800;
+uint8_t read806;
+uint8_t read86dd;
 
 static char *ciphers[] = {
 	[0]	"clear",
@@ -241,7 +252,7 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 		if (i == DEFAULT_SCAN_LIST_SIZE)
 			break;
 		if (memcmp(srcaddr(w), mac, 6) == 0 ||
-		    memcmp(dstaddr(w), mac, 6) == 0) {
+			memcmp(dstaddr(w), mac, 6) == 0) {
 			sprintf(str, "%02x%02x:", p[0], p[1]);
 			mac2str(str + 5, srcaddr(w));
 			sprintf(str + 17, ">");
@@ -249,7 +260,7 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%s", str);
 		}
 		if (bss != NULL &&
-		    memcmp(srcaddr(w), bss->bssid, 6) == 0) {
+			memcmp(srcaddr(w), bss->bssid, 6) == 0) {
 			rssi = packet->rx_ctrl.rssi;
 		}
 		switch(p[0] & 0xF0) {
@@ -317,8 +328,8 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			break;
 		case 0xB0:
 			if (bss != NULL &&
-			    memcmp(mac, dstaddr(w), 6) == 0 &&
-			    memcmp(bss->bssid, srcaddr(w), 6) == 0) {
+				memcmp(mac, dstaddr(w), 6) == 0 &&
+				memcmp(bss->bssid, srcaddr(w), 6) == 0) {
 				if (bss->brsnelen > 0 && bss->rsnelen == 0)
 					bss->status = Sneedauth;
 				else
@@ -328,8 +339,8 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 		case 0x10:
 		case 0x30:
 			if (bss != NULL &&
-			    memcmp(bss->bssid, srcaddr(w), 6) == 0 &&
-			    memcmp(mac, dstaddr(w), 6) == 0) {
+				memcmp(bss->bssid, srcaddr(w), 6) == 0 &&
+				memcmp(mac, dstaddr(w), 6) == 0) {
 				p += wifihdrlen(w);
 				p += 2;
 				l = p[0] | (p[1] << 8);
@@ -351,8 +362,8 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			break;
 		case 0xc0:
 			if (bss != NULL &&
-			    memcmp(mac, dstaddr(w), 6) == 0 &&
-			    memcmp(bss->bssid, srcaddr(w), 6) == 0) {
+				memcmp(mac, dstaddr(w), 6) == 0 &&
+				memcmp(bss->bssid, srcaddr(w), 6) == 0) {
 				bss->status = Sunauth;
 				bss->aid = 0;
 
@@ -379,12 +390,80 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			break;
 		}
 		break;
-	case WIFI_PKT_DATA:
-		if (bss != NULL &&
-		    memcmp(srcaddr(w), bss->bssid, 6) == 0 &&
-		    memcmp(dstaddr(w), mac, 6) == 0) {
-			ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "data[%d]", packet->rx_ctrl.sig_len);
+	default:
+		break;
+	}
+}
+
+static void addpkt(eth_pkt **list, eth_pkt *pkt)
+{
+	eth_pkt *cur;
+
+	if (*list == NULL)
+		*list = pkt;
+	else {
+		cur = *list;
+		while (cur->next != NULL)
+			cur = cur->next;
+		cur->next = pkt;	
+	}
+}
+
+static esp_err_t pkt_wifi2eth(void *buffer, uint16_t len, void *eb)
+{
+	uint8_t *data = (uint8_t*)buffer;
+	uint16_t type = (data[12] << 8) | data[13];
+	uint8_t mac[6];
+	eth_pkt *pkt;
+
+	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%04x", type);
+
+	ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
+
+	switch(type) {
+	case 0x800:
+		if (read800) {
+			pkt = calloc(1, sizeof(eth_pkt));
+			pkt->msg = calloc(1, sizeof(len));
+			pkt->len = len;
+			memcpy(pkt->msg, data, len);
+			addpkt(&eth800, pkt);
 		}
+		break;
+	case 0x806:
+		if (read806) {
+			pkt = calloc(1, sizeof(eth_pkt));
+			pkt->msg = calloc(1, sizeof(len));
+			pkt->len = len;
+			memcpy(pkt->msg, data, len);
+			addpkt(&eth806, pkt);
+		}
+		break;
+	case 0x86dd:
+		if (read86dd) {
+			pkt = calloc(1, sizeof(eth_pkt));
+			pkt->msg = calloc(1, sizeof(len));
+			pkt->len = len;
+			memcpy(pkt->msg, data, len);
+			addpkt(&eth86dd, pkt);
+		}
+		break;
+	}
+	
+	esp_wifi_internal_free_rx_buffer(eb);
+	return ESP_OK;
+}
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+	switch (event_id) {
+	case WIFI_EVENT_STA_CONNECTED:
+		ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "connected");
+		esp_wifi_internal_reg_rxcb(WIFI_IF_STA, pkt_wifi2eth);
+		break;
+	case WIFI_EVENT_STA_DISCONNECTED:
+		ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "disconnected");
+		esp_wifi_internal_reg_rxcb(WIFI_IF_STA, NULL);
 		break;
 	default:
 		break;
@@ -401,10 +480,11 @@ init_wifi(void)
 
 	ESP_ERROR_CHECK(nvs_flash_init());
 
-	ESP_ERROR_CHECK(esp_netif_init());
-	sta = esp_netif_create_default_wifi_sta();
-	assert(sta != NULL);
-	ESP_ERROR_CHECK(esp_netif_attach_wifi_station(sta));
+	read800 = read806 = read86dd = 0;
+
+	ESP_ERROR_CHECK(esp_event_loop_create_default());
+	ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
+
 	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
 	ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
@@ -516,6 +596,24 @@ read_ifstats(char *str)
 }
 
 unsigned long
+getpkt(char *str, eth_pkt **list)
+{
+	eth_pkt *cur;
+	unsigned long l;
+
+	while (*list == NULL)
+		vTaskDelay(10 / portTICK_RATE_MS);
+
+	cur = *list;
+	*list = (*list)->next;
+	memcpy(str, cur->msg, cur->len);
+	l = cur->len;
+	free(cur->msg);
+	free(cur);
+	return l;
+}
+
+unsigned long
 read_data(char *str, int type)
 {
 	uint8_t mac[6];
@@ -542,6 +640,12 @@ read_data(char *str, int type)
 			etherESP32_eapol_len = 0;
 			etherESP32_eapol_state = 2;
 			return 14 + l;
+		case 0x800:
+			return getpkt(str, &eth800);
+		case 0x806:
+			return getpkt(str, &eth806);
+		case 0x86dd:
+			return getpkt(str, &eth86dd);
 		default:
 			return 0;
 		}
@@ -553,6 +657,8 @@ read_data(char *str, int type)
 unsigned long
 write_data(char *str, unsigned long length, int type)
 {
+	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%02x %02x", str[0], str[6]);
+
 	if (bss != NULL) {
 		switch(type) {
 		case 0x888e:
@@ -567,7 +673,8 @@ write_data(char *str, unsigned long length, int type)
 		case 0x800:
 		case 0x86dd:
 		case 0x806:
-			ESP_ERROR_CHECK(esp_netif_transmit(sta, str, length));
+			if (length > 0)
+				ESP_ERROR_CHECK(esp_wifi_internal_tx(WIFI_IF_STA, str, length));
 			return length;
 		default:
 			return 0;
