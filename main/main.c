@@ -91,6 +91,11 @@ fs_walk(Fcall *ifcall) {
 				ofcall.wqid[i].version = 0;
 				ofcall.wqid[i].path = path = Qroot;
 			}
+			else if (!strcmp(ifcall->wname[i], "..")) {
+				ofcall.wqid[i].type = QTDIR;
+				ofcall.wqid[i].version = 0;
+				ofcall.wqid[i].path = path = Qroot;
+			}
 			else if (!strcmp(ifcall->wname[i], "etherESP32")) {
 				ofcall.wqid[i].type = QTDIR;
 				ofcall.wqid[i].version = 0;
@@ -257,13 +262,13 @@ fs_stat(Fcall *ifcall) {
 	case Qroot:
 		ofcall.stat.qid.type |= QTDIR;
 		ofcall.stat.qid.path = Qroot;
-		ofcall.stat.mode |= 0777 | DMDIR;
+		ofcall.stat.mode |= 0555 | DMDIR;
 		ofcall.stat.name = Sroot;
 		break;
 	case Qether:
 		ofcall.stat.qid.type |= QTDIR;
 		ofcall.stat.qid.path = Qether;
-		ofcall.stat.mode |= 0777 | DMDIR;
+		ofcall.stat.mode |= 0555 | DMDIR;
 		ofcall.stat.name = Sether;
 		break;
 	case Qaddr:
@@ -306,7 +311,7 @@ fs_stat(Fcall *ifcall) {
 	if ((ent->data - QNUM) < nconns) {
 		ofcall.stat.qid.type |= QTDIR;
 		ofcall.stat.qid.path = ent->data;
-		ofcall.stat.mode = 0777 | DMDIR;
+		ofcall.stat.mode = 0555 | DMDIR;
 		snprintf(Sconn, 12, "%lu", ent->data - QNUM);
 		ofcall.stat.name = Sconn;
 	}
@@ -343,7 +348,6 @@ fs_open(Fcall *ifcall) {
 	else if (cur->data == Qclone) {
 		cur->conn = nconns;
 		cur->data = Qctl;
-		ofcall.qid.path = Qctl;
 		nconns++;
 		conntypes = realloc(conntypes, nconns);
 		conntypes[cur->conn] = 0;
@@ -370,7 +374,7 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		stat.dev = 0;
 		stat.qid.type = QTFILE | QTDIR;
 		stat.qid.path = Qether;
-		stat.mode = 0777 | DMDIR;
+		stat.mode = 0555 | DMDIR;
 		stat.atime = 0;
 		stat.mtime = 0;
 		stat.length = 0;
@@ -390,7 +394,7 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		for (id = 0; id < nconns; id++) {
 			stat.qid.type |= QTDIR;
 			stat.qid.path = QNUM + id;
-			stat.mode = 0777 | DMDIR;
+			stat.mode = 0555 | DMDIR;
 			snprintf(Sconn, 12, "%lu", id);
 			stat.name = Sconn;
 			ofcall.count += putstat(out, ofcall.count, &stat);
@@ -429,6 +433,9 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 	}
 	else if (((unsigned long)cur->data) == Qctl) {
 		ofcall.count = sprintf((char*)out, "%11d ", cur->conn);
+	}
+	else if (((unsigned long)cur->data) == Qtype) {
+		ofcall.count = sprintf((char*)out, "%11d ", conntypes[cur->conn]);
 	}
 	else if (((unsigned long)cur->data) == Qstats) {
 		ofcall.count = read_stats((char*)out);
@@ -487,7 +494,7 @@ fs_read(Fcall *ifcall, unsigned char *out) {
 		ofcall.ename = Enofile;
 	}
 
-	if (ifcall->offset != 0 && ((unsigned long)cur->data) != Qdata && ((unsigned long)cur->data) != Qlog) {
+	if (ifcall->offset != 0 && ((unsigned long)cur->data) != Qdata) {
 		if (ofcall.count >= ifcall->offset) {
 			memmove(out, &out[ifcall->offset], ofcall.count - ifcall->offset);
 			ofcall.count -= ifcall->offset;
@@ -523,10 +530,12 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 	}
 
 	if (((unsigned long)cur->data) == Qctl) {
-		if (strncmp((const char*)in, "connect ", 8) == 0) {
-			in[ifcall->count] = '\0';
-			in[strcspn((const char*)in, "\r\n")] = '\0';
+		in[ifcall->count] = '\0';
+		in[strcspn((const char*)in, "\r\n")] = '\0';
 
+		ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "ctl", "type:0x%04x: %s", conntypes[cur->conn], in);
+
+		if (strncmp((const char*)in, "connect ", 8) == 0) {
 			conntypes[cur->conn] = strtoul((const char*)&in[8], 0, 0);
 
 			ofcall.count = ifcall->count;
@@ -534,18 +543,12 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 		}
 		if (conntypes[cur->conn] == 0x888e) {
 			if (strncmp((const char*)in, "essid ", 6) == 0) {
-				in[ifcall->count] = '\0';
-				in[strcspn((const char*)in, "\r\n")] = '\0';
-
 				set_essid((char*)&in[6]);
 
 				ofcall.count = ifcall->count;
 				return &ofcall;
 			}
 			else if (strncmp((const char*)in, "auth", 4) == 0) {
-				in[ifcall->count] = '\0';
-				in[strcspn((const char*)in, "\r\n")] = '\0';
-
 				if (in[4] == ' ')
 					set_brsne((char*)&in[5]);
 				else if (in[4] == '\0')
@@ -555,11 +558,20 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 				return &ofcall;
 			}
 			else if (strncmp((const char*)(&in[2]), "key", 3) == 0) {
-				in[ifcall->count] = '\0';
-				in[strcspn((const char*)in, "\r\n")] = '\0';
-
 				set_key_str((char*)in);
 
+				ofcall.count = ifcall->count;
+				return &ofcall;
+			}
+		}
+		else if (conntypes[cur->conn] == 0x800) {
+			if (strcmp((const char*)in, "nonblocking") == 0) {
+				ofcall.count = ifcall->count;
+				return &ofcall;
+			}
+		}
+		else if (conntypes[cur->conn] == 0x86dd) {
+			if (strcmp((const char*)in, "nonblocking") == 0) {
 				ofcall.count = ifcall->count;
 				return &ofcall;
 			}
@@ -567,8 +579,7 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 	}
 	else if (((unsigned long)cur->data) == Qdata) {
 		ofcall.count = write_data((char*)in, ifcall->count, conntypes[cur->conn]);
-		if (ofcall.count > 0)
-			return &ofcall;
+		return &ofcall;
 	}
 
 	ofcall.type = RError;
@@ -629,7 +640,7 @@ runNinePea(void *arg)
  
 	while(xSemaphoreTake(sendMutex, 20 / portTICK_RATE_MS) != pdTRUE);
 
-//	uart_write_bytes(UART_NUM_0, "9P", 2);
+	uart_write_bytes(UART_NUM_0, "9P", 2);
 	uart_write_bytes(UART_NUM_0, (const char*)msg->msg, msg->len);
 
 	xSemaphoreGive(sendMutex);
@@ -661,7 +672,7 @@ app_main(void)
 	ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0));
 	ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
 
-	esp_log_set_vprintf(&vprintf_etherESP32);
+//	esp_log_set_vprintf(&vprintf_etherESP32);
 	init_wifi();
 
 	fs_fid_init(64);

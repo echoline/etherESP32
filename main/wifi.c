@@ -1,8 +1,11 @@
 #include "wifi.h"
 #include "esp_log.h"
 #include "esp_private/wifi.h"
+#include "esp_netif_net_stack.h"
 
 #define DEFAULT_SCAN_LIST_SIZE 64
+
+static esp_netif_t *sta;
 
 static uint16_t ap_count;
 
@@ -376,6 +379,13 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 			break;
 		}
 		break;
+	case WIFI_PKT_DATA:
+		if (bss != NULL &&
+		    memcmp(srcaddr(w), bss->bssid, 6) == 0 &&
+		    memcmp(dstaddr(w), mac, 6) == 0) {
+			ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "data[%d]", packet->rx_ctrl.sig_len);
+		}
+		break;
 	default:
 		break;
 	}
@@ -385,7 +395,6 @@ void
 init_wifi(void)
 {
 	wifi_second_chan_t chan;
-	esp_netif_t *sta;
 
 	log_etherESP32 = calloc(1, sizeof(char));
 	etherESP32_eapol_state = 0;
@@ -512,25 +521,30 @@ read_data(char *str, int type)
 	uint8_t mac[6];
 	uint32_t l;
 
-	if (type == 0x888e && bss != NULL) {
-		while(etherESP32_eapol_state != 1)
-			vTaskDelay(10 / portTICK_PERIOD_MS);
+	if (bss != NULL) {
+		switch (type) {
+		case 0x888e:
+			while(etherESP32_eapol_state != 1)
+				vTaskDelay(10 / portTICK_PERIOD_MS);
 
-		if (etherESP32_eapol_len == 0) { 
-			etherESP32_eapol_state = 0;
+			if (etherESP32_eapol_len == 0) { 
+				etherESP32_eapol_state = 0;
+				return 0;
+			}
+
+			ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
+			memcpy(str, mac, 6);
+			memcpy(&str[6], bss->bssid, 6);
+			memcpy(&str[12], "\x88\x8e", 2);
+			memcpy(&str[14], etherESP32_eapol_data, etherESP32_eapol_len);
+			l = etherESP32_eapol_len;
+			free(etherESP32_eapol_data);
+			etherESP32_eapol_len = 0;
+			etherESP32_eapol_state = 2;
+			return 14 + l;
+		default:
 			return 0;
 		}
-
-		ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
-		memcpy(str, mac, 6);
-		memcpy(&str[6], bss->bssid, 6);
-		memcpy(&str[12], "\x88\x8e", 2);
-		memcpy(&str[14], etherESP32_eapol_data, etherESP32_eapol_len);
-		l = etherESP32_eapol_len;
-		free(etherESP32_eapol_data);
-		etherESP32_eapol_len = 0;
-		etherESP32_eapol_state = 2;
-		return 14 + l;
 	}
 
 	return 0;
@@ -539,15 +553,25 @@ read_data(char *str, int type)
 unsigned long
 write_data(char *str, unsigned long length, int type)
 {
-	if (type == 0x888e && bss != NULL) {
-		while(etherESP32_eapol_state != 2)
-			vTaskDelay(10 / portTICK_PERIOD_MS);
+	if (bss != NULL) {
+		switch(type) {
+		case 0x888e:
+			while(etherESP32_eapol_state != 2)
+				vTaskDelay(10 / portTICK_PERIOD_MS);
 
-		etherESP32_eapol_data = malloc(length);
-		memcpy(etherESP32_eapol_data, str, length);
-		etherESP32_eapol_len = length - 14;
-		etherESP32_eapol_state = 3;
-		return length;
+			etherESP32_eapol_data = malloc(length);
+			memcpy(etherESP32_eapol_data, str, length);
+			etherESP32_eapol_len = length - 14;
+			etherESP32_eapol_state = 3;
+			return length;
+		case 0x800:
+		case 0x86dd:
+		case 0x806:
+			ESP_ERROR_CHECK(esp_netif_transmit(sta, str, length));
+			return length;
+		default:
+			return 0;
+		}
 	}
 
 	return 0;
