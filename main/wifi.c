@@ -417,43 +417,54 @@ static esp_err_t pkt_wifi2eth(void *buffer, uint16_t len, void *eb)
 	uint8_t *data = (uint8_t*)buffer;
 	uint16_t type = (data[12] << 8) | data[13];
 	eth_pkt *pkt;
+	uint8_t mac[6];
+	uint8_t brd[6];
+	char src[13];
+	char dst[13];
 
-	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%04x", type);
+	ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
+	memset(brd, '\xFF', 6);
 
-	switch(type) {
-	case 0x800:
-		if (read800) {
-			pkt = calloc(1, sizeof(eth_pkt));
-			pkt->msg = calloc(1, sizeof(len));
-			pkt->len = len;
-			memcpy(pkt->msg, data, len);
-			while(xSemaphoreTake(mutex800, 20 / portTICK_RATE_MS) != pdTRUE);
-			addpkt(&eth800, pkt);
-			xSemaphoreGive(mutex800);
+	mac2str(src, &data[6]);
+	mac2str(dst, &data[0]);
+	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "rx %s>%s %04x", src, dst, type);
+
+	if (memcmp(mac, data, 6) == 0 || memcmp(brd, data, 6) == 0) {
+		switch(type) {
+		case 0x800:
+			if (read800) {
+				pkt = calloc(1, sizeof(eth_pkt));
+				pkt->msg = malloc(len);
+				pkt->len = len;
+				memcpy(pkt->msg, data, len);
+				while(xSemaphoreTake(mutex800, 20 / portTICK_RATE_MS) != pdTRUE);
+				addpkt(&eth800, pkt);
+				xSemaphoreGive(mutex800);
+			}
+			break;
+		case 0x806:
+			if (read806) {
+				pkt = calloc(1, sizeof(eth_pkt));
+				pkt->msg = malloc(len);
+				pkt->len = len;
+				memcpy(pkt->msg, data, len);
+				while(xSemaphoreTake(mutex806, 20 / portTICK_RATE_MS) != pdTRUE);
+				addpkt(&eth806, pkt);
+				xSemaphoreGive(mutex806);
+			}
+			break;
+		case 0x86dd:
+			if (read86dd) {
+				pkt = calloc(1, sizeof(eth_pkt));
+				pkt->msg = malloc(len);
+				pkt->len = len;
+				memcpy(pkt->msg, data, len);
+				while(xSemaphoreTake(mutex86dd, 20 / portTICK_RATE_MS) != pdTRUE);
+				addpkt(&eth86dd, pkt);
+				xSemaphoreGive(mutex86dd);
+			}
+			break;
 		}
-		break;
-	case 0x806:
-		if (read806) {
-			pkt = calloc(1, sizeof(eth_pkt));
-			pkt->msg = calloc(1, sizeof(len));
-			pkt->len = len;
-			memcpy(pkt->msg, data, len);
-			while(xSemaphoreTake(mutex806, 20 / portTICK_RATE_MS) != pdTRUE);
-			addpkt(&eth806, pkt);
-			xSemaphoreGive(mutex806);
-		}
-		break;
-	case 0x86dd:
-		if (read86dd) {
-			pkt = calloc(1, sizeof(eth_pkt));
-			pkt->msg = calloc(1, sizeof(len));
-			pkt->len = len;
-			memcpy(pkt->msg, data, len);
-			while(xSemaphoreTake(mutex86dd, 20 / portTICK_RATE_MS) != pdTRUE);
-			addpkt(&eth86dd, pkt);
-			xSemaphoreGive(mutex86dd);
-		}
-		break;
 	}
 	
 	esp_wifi_internal_free_rx_buffer(eb);
@@ -487,6 +498,7 @@ init_wifi(void)
 	ESP_ERROR_CHECK(nvs_flash_init());
 
 	read800 = read806 = read86dd = 0;
+	eth800 = eth806 = eth86dd = NULL;
 	vSemaphoreCreateBinary(mutex800);
 	vSemaphoreCreateBinary(mutex806);
 	vSemaphoreCreateBinary(mutex86dd);
@@ -610,9 +622,6 @@ getpkt(char *str, eth_pkt **list)
 	eth_pkt *cur;
 	unsigned long l;
 
-	while (*list == NULL)
-		vTaskDelay(10 / portTICK_RATE_MS);
-
 	cur = *list;
 	*list = (*list)->next;
 	memcpy(str, cur->msg, cur->len);
@@ -650,16 +659,25 @@ read_data(char *str, int type)
 			etherESP32_eapol_state = 2;
 			return 14 + l;
 		case 0x800:
+			while (eth800 == NULL)
+				vTaskDelay(10 / portTICK_RATE_MS);
+
 			while(xSemaphoreTake(mutex800, 20 / portTICK_RATE_MS) != pdTRUE);
 			l = getpkt(str, &eth800);
 			xSemaphoreGive(mutex800);
 			return l;
 		case 0x806:
+			while (eth806 == NULL)
+				vTaskDelay(10 / portTICK_RATE_MS);
+
 			while(xSemaphoreTake(mutex806, 20 / portTICK_RATE_MS) != pdTRUE);
 			l = getpkt(str, &eth806);
 			xSemaphoreGive(mutex806);
 			return l;
 		case 0x86dd:
+			while (eth86dd == NULL)
+				vTaskDelay(10 / portTICK_RATE_MS);
+
 			while(xSemaphoreTake(mutex86dd, 20 / portTICK_RATE_MS) != pdTRUE);
 			l = getpkt(str, &eth86dd);
 			xSemaphoreGive(mutex86dd);
@@ -673,9 +691,14 @@ read_data(char *str, int type)
 }
 
 unsigned long
-write_data(char *str, unsigned long length, int type)
+write_data(uchar *str, unsigned long length, int type)
 {
-	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "%02x %02x", str[0], str[6]);
+	char src[13];
+	char dst[13];
+
+	mac2str(src, &str[6]);
+	mac2str(dst, &str[0]);
+	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "tx %s>%s %02x%02x", src, dst, str[12], str[13]);
 
 	if (bss != NULL) {
 		switch(type) {

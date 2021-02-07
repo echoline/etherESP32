@@ -556,7 +556,6 @@ static Fcall*
 fs_write(Fcall *ifcall, unsigned char *in) {
 	struct hentry *cur = fs_fid_find(ifcall->fid);
 	static Fcall ofcall;
-	int i;
 	int type;
 
 	if (cur == NULL) {
@@ -616,7 +615,7 @@ fs_write(Fcall *ifcall, unsigned char *in) {
 		}
 	}
 	else if (((unsigned long)cur->data) == Qdata) {
-		ofcall.count = write_data((char*)in, ifcall->count, conntypes[cur->conn]);
+		ofcall.count = write_data(in, ifcall->count, conntypes[cur->conn]);
 		return &ofcall;
 	}
 
