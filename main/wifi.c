@@ -188,6 +188,10 @@ set_brsne(char *in)
 		l = strlen(in);
 		l >>= 1;
 		bss->rsnelen = hextob(in, NULL, bss->rsne, l);
+		if (bss->aid == 0)
+			bss->status = Sconn;
+		else
+			bss->status = Sauth;
 	}
 }
 
@@ -303,6 +307,7 @@ wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 					l += p[l] + 1;
 					if (rsnset)
 						break;
+					/* fall through */
 				case 48:
 					wns[i].brsnelen = p[l+1] + 2;
 					memcpy(wns[i].brsne, &p[l], wns[i].brsnelen);
@@ -425,8 +430,8 @@ static esp_err_t pkt_wifi2eth(void *buffer, uint16_t len, void *eb)
 	ESP_ERROR_CHECK(esp_efuse_mac_get_default(mac));
 	memset(brd, '\xFF', 6);
 
-	mac2str(src, &data[6]);
-	mac2str(dst, &data[0]);
+	mac2str(src, &data[0]);
+	mac2str(dst, &data[6]);
 	ESP_LOG_LEVEL_LOCAL(ESP_LOG_ERROR, "wifi", "rx %s>%s %04x", src, dst, type);
 
 	if (memcmp(mac, data, 6) == 0 || memcmp(brd, data, 6) == 0) {
@@ -695,6 +700,10 @@ write_data(uchar *str, unsigned long length, int type)
 {
 	char src[13];
 	char dst[13];
+	Wifipkt *w;
+	SNAP *s;
+	uchar *buf;
+	int l;
 
 	mac2str(src, &str[6]);
 	mac2str(dst, &str[0]);
@@ -714,8 +723,26 @@ write_data(uchar *str, unsigned long length, int type)
 		case 0x800:
 		case 0x86dd:
 		case 0x806:
-			if (length > 0)
-				ESP_ERROR_CHECK(esp_wifi_internal_tx(WIFI_IF_STA, str, length));
+			if (length > 0) {
+				buf = calloc(1, WIFIHDRSIZE + SNAPHDRSIZE + length);
+				w = (Wifipkt*)buf;
+				w->fc[0] = 0x08;
+				w->fc[1] = 0x01;
+				memcpy(w->a1, &str[0], 6);
+				memcpy(dstaddr(w), &str[0], 6);
+				memcpy(srcaddr(w), &str[6], 6);
+				l = wifihdrlen(w);
+				s = (SNAP*)(&buf[l]);
+				s->dsap = s->ssap = 0xAA;
+				s->control = 0x03;
+				memset(s->orgcode, 0, 3);
+				memcpy(s->type, &str[12], 2);
+				l += SNAPHDRSIZE;
+				memcpy(&buf[l], &str[14], length - 14);
+				l += length - 14;
+				ESP_ERROR_CHECK(esp_wifi_internal_tx(ESP_IF_WIFI_STA, buf, l));
+				free(buf);
+			}
 			return length;
 		default:
 			return 0;

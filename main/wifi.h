@@ -7,10 +7,12 @@
 
 #define Eaddrlen 6
 #define WIFIHDRSIZE (2+2+3*6+2)
+#define SNAPHDRSIZE 8
 
 typedef struct Wkey Wkey;
 typedef struct Wnode Wnode;
 typedef struct Wifipkt Wifipkt;
+typedef struct SNAP SNAP;
 
 /* cipher */
 enum {
@@ -75,6 +77,14 @@ struct Wifipkt
 	uchar	a4[Eaddrlen];
 };
 
+struct SNAP
+{
+	uchar	dsap;
+	uchar	ssap;
+	uchar	control;
+	uchar	orgcode[3];
+	uchar	type[2];
+};
 
 void init_wifi(void);
 void get_mac_address(char*);
